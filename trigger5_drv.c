@@ -263,6 +263,20 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 	return checksum & 0xff;
 }
 
+
+struct trigger5_bulk_context {
+	struct timer_list timer;
+	struct usb_sg_request sgr;
+};
+
+static void trigger5_bulk_timeout(struct timer_list *t)
+{
+	struct trigger5_bulk_context *ctx = from_timer(ctx, t, timer);
+
+	usb_sg_cancel(&ctx->sgr);
+}
+
+
 static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 				 struct drm_plane_state *old_state)
 {
@@ -274,21 +288,41 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 	struct trigger5_bulk_header header;
 	int width = state->fb->width;
 	int height = state->fb->height;
+	unsigned int num_pages, len;
+	int i, ret;
+	struct sg_table transfer_sgt;
+	struct page **pages;
+	void *ptr;
 	u8 *data;
 	struct iosys_map data_map;
+	struct trigger5_bulk_context ctx;
 	full_rect.x1 = 0;
 	full_rect.y1 = 0;
 	full_rect.x2 = width;
 	full_rect.y2 = height;
 
 	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
-		data = kmalloc(sizeof(struct trigger5_bulk_header) +
-				       width * height * 3,
-			       GFP_KERNEL);
+		len = sizeof(struct trigger5_bulk_header) + width * height * 3;
+		data = vmalloc_32(len);
 		if (!data)
 			return;
-		iosys_map_set_vaddr(&data_map,
-				    data + sizeof(struct trigger5_bulk_header));
+
+		num_pages = DIV_ROUND_UP(len, PAGE_SIZE);
+		pages = kmalloc_array(num_pages, sizeof(struct page *),
+				      GFP_KERNEL);
+		if (!pages) {
+			vfree(data);
+			return;
+		}
+		for (i = 0, ptr = data; i < num_pages; i++, ptr += PAGE_SIZE)
+			pages[i] = vmalloc_to_page(ptr);
+		ret = sg_alloc_table_from_pages(&transfer_sgt, pages, num_pages,
+						0, len, GFP_KERNEL);
+		kfree(pages);
+		if (ret) {
+			vfree(data);
+			return;
+		}
 
 		// Only full screen updates work
 		header.magic = 0xfb;
@@ -305,25 +339,38 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 		header.checksum = trigger5_bulk_header_checksum(&header);
 		memcpy(data, &header, sizeof(struct trigger5_bulk_header));
 
+		iosys_map_set_vaddr(&data_map,
+				    data + sizeof(struct trigger5_bulk_header));
 		drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
 					  &shadow_plane_state->data[0],
 					  state->fb, &full_rect);
 
-		usb_bulk_msg(interface_to_usbdev(trigger5->intf),
-			     usb_sndbulkpipe(
-				     interface_to_usbdev(trigger5->intf), 0x01),
-			     data,
-			     sizeof(struct trigger5_bulk_header) +
-				     width * height * 3,
-			     NULL, USB_CTRL_SET_TIMEOUT);
+		ret = usb_sg_init(
+			&ctx.sgr, interface_to_usbdev(trigger5->intf),
+			usb_sndbulkpipe(interface_to_usbdev(trigger5->intf),
+					0x01),
+			0, transfer_sgt.sgl, transfer_sgt.nents, len,
+			GFP_KERNEL);
+		if (ret) {
+			sg_free_table(&transfer_sgt);
+			vfree(data);
+			return;
+		}
 
-		usb_control_msg(
+		timer_setup_on_stack(&ctx.timer, trigger5_bulk_timeout, 0);
+		mod_timer(&ctx.timer, jiffies + msecs_to_jiffies(5000));
+
+		usb_sg_wait(&ctx.sgr);
+		del_timer_sync(&ctx.timer);
+		destroy_timer_on_stack(&ctx.timer);
+
+		/*usb_control_msg(
 			interface_to_usbdev(trigger5->intf),
 			usb_rcvctrlpipe(interface_to_usbdev(trigger5->intf), 0),
 			0x91, USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			0x0002, 0x0000, data, 1, USB_CTRL_SET_TIMEOUT);
+			0x0002, 0x0000, data, 1, USB_CTRL_SET_TIMEOUT);*/
 
-		kfree(data);
+		vfree(data);
 	}
 }
 
