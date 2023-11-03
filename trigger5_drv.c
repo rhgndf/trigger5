@@ -227,7 +227,7 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 
 static void trigger5_pipe_disable(struct drm_simple_display_pipe *pipe)
 {
-	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
+	//struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
 }
 
 enum drm_mode_status
@@ -276,14 +276,12 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 	int height = state->fb->height;
 	u8 *data;
 	struct iosys_map data_map;
-	int i;
 	full_rect.x1 = 0;
 	full_rect.y1 = 0;
 	full_rect.x2 = width;
 	full_rect.y2 = height;
 
 	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
-
 		data = kmalloc(sizeof(struct trigger5_bulk_header) +
 				       width * height * 3,
 			       GFP_KERNEL);
@@ -307,7 +305,7 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 		header.checksum = trigger5_bulk_header_checksum(&header);
 		memcpy(data, &header, sizeof(struct trigger5_bulk_header));
 
-		drm_fb_xrgb8888_to_rgb888(&data_map, NU,
+		drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
 					  &shadow_plane_state->data[0],
 					  state->fb, &full_rect);
 
