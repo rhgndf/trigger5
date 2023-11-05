@@ -105,7 +105,7 @@ static void trigger6_calculate_pll(struct trigger6_pll *pll, int clock)
 	int mul1, mul2, div1, div2;
 
 	// Use values found in the capture
-	for (mul1 = 0x31; mul1 >= 0x27; mul1--) {
+	for (mul1 = 0x27; mul1 <= 0x31; mul1++) {
 		for (mul2 = 0x0a; mul2 <= 0x24; mul2++) {
 			for (div1 = 0x19; div1 <= 0x32; div1++) {
 				for (div2 = 0x02; div2 <= 0x04; div2 <<= 1) {
@@ -145,7 +145,6 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 			usb_rcvctrlpipe(interface_to_usbdev(trigger5->intf), 0),
 			0xd1, USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 			0x0000, 0x0000, data, 1, USB_CTRL_GET_TIMEOUT);
-		drm_warn(&trigger5->drm, "0xd1: %02x\n", data[0]);
 
 		request = kmalloc(sizeof(struct trigger6_mode_request),
 				  GFP_KERNEL);
@@ -179,16 +178,12 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 
 		trigger6_calculate_pll(&request->pll, mode->clock);
 
-		drm_info(&trigger5->drm,
-			 "Calculated pll: %02x %02x %02x %02x %d\n",
-			 request->pll.mul1, request->pll.mul2,
-			 request->pll.div1, request->pll.div2, mode->clock);
-
 		usb_control_msg(
 			interface_to_usbdev(trigger5->intf),
 			usb_sndctrlpipe(interface_to_usbdev(trigger5->intf), 0),
-			0xc3, USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			mode_number, 0x0000, request,
+			TRIGGER5_REQUEST_SET_MODE,
+			USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+			mode_number, 0, request,
 			sizeof(struct trigger6_mode_request),
 			USB_CTRL_SET_TIMEOUT);
 
@@ -263,19 +258,80 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 	return checksum & 0xff;
 }
 
-
-struct trigger5_bulk_context {
-	struct timer_list timer;
-	struct usb_sg_request sgr;
-};
-
 static void trigger5_bulk_timeout(struct timer_list *t)
 {
-	struct trigger5_bulk_context *ctx = from_timer(ctx, t, timer);
+	struct trigger5_device *trigger5 = from_timer(trigger5, t, timer);
 
-	usb_sg_cancel(&ctx->sgr);
+	usb_sg_cancel(&trigger5->sgr);
 }
 
+static void trigger5_free_bulk_buffer(struct trigger5_device *trigger5)
+{
+	if (!trigger5->frame_data)
+		return;
+	sg_free_table(&trigger5->transfer_sgt);
+	vfree(trigger5->frame_data);
+	trigger5->frame_data = NULL;
+	trigger5->frame_len = -1;
+}
+static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
+				      unsigned int len)
+{
+	unsigned int num_pages;
+	int ret, i;
+	struct page **pages;
+	u8 *data;
+	void *ptr;
+
+	if (trigger5->frame_len == len) {
+		return 0;
+	}
+	trigger5_free_bulk_buffer(trigger5);
+
+	data = vmalloc_32(len);
+	if (!data) {
+		return -ENOMEM;
+	}
+
+	num_pages = DIV_ROUND_UP(len, PAGE_SIZE);
+	pages = kmalloc_array(num_pages, sizeof(struct page *), GFP_KERNEL);
+	if (!pages) {
+		ret = -ENOMEM;
+		goto err_vfree;
+	}
+	for (i = 0, ptr = data; i < num_pages; i++, ptr += PAGE_SIZE)
+		pages[i] = vmalloc_to_page(ptr);
+	ret = sg_alloc_table_from_pages(&trigger5->transfer_sgt, pages,
+					num_pages, 0, len, GFP_KERNEL);
+	kfree(pages);
+	if (ret) {
+		goto err_vfree;
+	}
+
+	trigger5->frame_len = len;
+	trigger5->frame_data = data;
+	timer_setup(&trigger5->timer, trigger5_bulk_timeout, 0);
+
+	return 0;
+	sg_free_table(&trigger5->transfer_sgt);
+err_vfree:
+	vfree(data);
+	return ret;
+}
+
+static void trigger5_transfer_work(struct work_struct *work)
+{
+	struct trigger5_device *trigger5 =
+		container_of(work, struct trigger5_device, transfer_work);
+	struct usb_device *usbdev = interface_to_usbdev(trigger5->intf);
+	usb_sg_init(&trigger5->sgr, usbdev, usb_sndbulkpipe(usbdev, 0x01), 0,
+		    trigger5->transfer_sgt.sgl, trigger5->transfer_sgt.nents,
+		    trigger5->frame_len, GFP_KERNEL);
+	mod_timer(&trigger5->timer, jiffies + msecs_to_jiffies(5000));
+	usb_sg_wait(&trigger5->sgr);
+	del_timer_sync(&trigger5->timer);
+	complete(&trigger5->frame_complete);
+}
 
 static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 				 struct drm_plane_state *old_state)
@@ -285,92 +341,57 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 		to_drm_shadow_plane_state(state);
 	struct drm_rect current_rect, full_rect;
 	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
-	struct trigger5_bulk_header header;
-	int width = state->fb->width;
-	int height = state->fb->height;
-	unsigned int num_pages, len;
-	int i, ret;
-	struct sg_table transfer_sgt;
-	struct page **pages;
-	void *ptr;
-	u8 *data;
+	struct trigger5_bulk_header *header;
+	int width, height, ret;
 	struct iosys_map data_map;
-	struct trigger5_bulk_context ctx;
-	full_rect.x1 = 0;
-	full_rect.y1 = 0;
-	full_rect.x2 = width;
-	full_rect.y2 = height;
 
 	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
-		len = sizeof(struct trigger5_bulk_header) + width * height * 3;
-		data = vmalloc_32(len);
-		if (!data)
-			return;
+		wait_for_completion_interruptible_timeout(
+			&trigger5->frame_complete, msecs_to_jiffies(1000));
+		width = state->fb->width;
+		height = state->fb->height;
+		full_rect.x1 = 0;
+		full_rect.y1 = 0;
+		full_rect.x2 = width;
+		full_rect.y2 = height;
 
-		num_pages = DIV_ROUND_UP(len, PAGE_SIZE);
-		pages = kmalloc_array(num_pages, sizeof(struct page *),
-				      GFP_KERNEL);
-		if (!pages) {
-			vfree(data);
-			return;
-		}
-		for (i = 0, ptr = data; i < num_pages; i++, ptr += PAGE_SIZE)
-			pages[i] = vmalloc_to_page(ptr);
-		ret = sg_alloc_table_from_pages(&transfer_sgt, pages, num_pages,
-						0, len, GFP_KERNEL);
-		kfree(pages);
+		ret = trigger5_alloc_bulk_buffer(
+			trigger5, width * height * 3 +
+					  sizeof(struct trigger5_bulk_header));
 		if (ret) {
-			vfree(data);
 			return;
 		}
 
 		// Only full screen updates work
-		header.magic = 0xfb;
-		header.length = 0x14;
-		header.counter = (trigger5->frame_counter++) & 0xfff;
-		header.horizontal_offset = cpu_to_le16(0);
-		header.vertical_offset = cpu_to_le16(0);
-		header.width = cpu_to_le16(width);
-		header.height = cpu_to_le16(height);
-		header.payload_length = cpu_to_le32(width * height * 3);
-		header.flags = 0x1;
-		header.unknown1 = 0;
-		header.unknown2 = 0;
-		header.checksum = trigger5_bulk_header_checksum(&header);
-		memcpy(data, &header, sizeof(struct trigger5_bulk_header));
+		header = (struct trigger5_bulk_header *)trigger5->frame_data;
+		header->magic = 0xfb;
+		header->length = 0x14;
+		header->counter = (trigger5->frame_counter++) & 0xfff;
+		header->horizontal_offset = cpu_to_le16(0);
+		header->vertical_offset = cpu_to_le16(0);
+		header->width = cpu_to_le16(width);
+		header->height = cpu_to_le16(height);
+		header->payload_length = cpu_to_le32(width * height * 3);
+		header->flags = 0x1;
+		header->unknown1 = 0;
+		header->unknown2 = 0;
+		header->checksum = trigger5_bulk_header_checksum(header);
 
-		iosys_map_set_vaddr(&data_map,
-				    data + sizeof(struct trigger5_bulk_header));
+		iosys_map_set_vaddr(
+			&data_map, trigger5->frame_data +
+					   sizeof(struct trigger5_bulk_header));
+
 		drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
 					  &shadow_plane_state->data[0],
 					  state->fb, &full_rect);
 
-		ret = usb_sg_init(
-			&ctx.sgr, interface_to_usbdev(trigger5->intf),
-			usb_sndbulkpipe(interface_to_usbdev(trigger5->intf),
-					0x01),
-			0, transfer_sgt.sgl, transfer_sgt.nents, len,
-			GFP_KERNEL);
-		if (ret) {
-			sg_free_table(&transfer_sgt);
-			vfree(data);
-			return;
-		}
-
-		timer_setup_on_stack(&ctx.timer, trigger5_bulk_timeout, 0);
-		mod_timer(&ctx.timer, jiffies + msecs_to_jiffies(5000));
-
-		usb_sg_wait(&ctx.sgr);
-		del_timer_sync(&ctx.timer);
-		destroy_timer_on_stack(&ctx.timer);
+		queue_work(system_highpri_wq, &trigger5->transfer_work);
 
 		/*usb_control_msg(
 			interface_to_usbdev(trigger5->intf),
 			usb_rcvctrlpipe(interface_to_usbdev(trigger5->intf), 0),
 			0x91, USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 			0x0002, 0x0000, data, 1, USB_CTRL_SET_TIMEOUT);*/
-
-		vfree(data);
 	}
 }
 
@@ -394,6 +415,9 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	unsigned int i;
 	struct trigger5_device *trigger5;
 	struct drm_device *dev;
+	int min_width = 20000, min_height = 20000;
+	int max_width = 0, max_height = 0;
+	int cur_width, cur_height;
 
 	trigger5 = devm_drm_dev_alloc(&interface->dev, &driver,
 				      struct trigger5_device, drm);
@@ -412,28 +436,35 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_put_device;
 
-	/* No idea */
-	dev->mode_config.min_width = 0;
-	dev->mode_config.max_width = 10000;
-	dev->mode_config.min_height = 0;
-	dev->mode_config.max_height = 10000;
-	dev->mode_config.funcs = &trigger5_mode_config_funcs;
-
 	usb_control_msg(interface_to_usbdev(interface),
 			usb_rcvctrlpipe(interface_to_usbdev(interface), 0),
-			0xa4, USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			0x0000, 0x0000, &trigger5->mode_list,
-			sizeof(trigger5->mode_list), USB_CTRL_GET_TIMEOUT);
+			TRIGGER5_REQUEST_GET_MODE,
+			USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0, 0,
+			&trigger5->mode_list, sizeof(trigger5->mode_list),
+			USB_CTRL_GET_TIMEOUT);
 
 	for (i = 0; i < be16_to_cpu(trigger5->mode_list.count); i++) {
-		drm_info(dev, "mode %d: %dx%d@%dHz\n",
-			 trigger5->mode_list.modes[i].mode_number,
-			 le16_to_cpu(trigger5->mode_list.modes[i].width),
-			 le16_to_cpu(trigger5->mode_list.modes[i].height),
-			 trigger5->mode_list.modes[i].hz);
+		cur_width = le16_to_cpu(trigger5->mode_list.modes[i].width);
+		cur_height = le16_to_cpu(trigger5->mode_list.modes[i].height);
+		min_width = min(min_width, cur_width);
+		min_height = min(min_height, cur_height);
+		max_width = max(max_width, cur_width);
+		max_height = max(max_height, cur_height);
 	}
 
+	dev->mode_config.min_width = min_width;
+	dev->mode_config.max_width = max_width;
+	dev->mode_config.min_height = min_height;
+	dev->mode_config.max_height = max_height;
+	dev->mode_config.funcs = &trigger5_mode_config_funcs;
+
 	trigger5->frame_counter = 0;
+	trigger5->frame_len = 0;
+
+	init_completion(&trigger5->frame_complete);
+	complete(&trigger5->frame_complete);
+
+	INIT_WORK(&trigger5->transfer_work, trigger5_transfer_work);
 
 	ret = trigger5_connector_init(trigger5);
 	if (ret)
@@ -477,6 +508,7 @@ static void trigger5_usb_disconnect(struct usb_interface *interface)
 	drm_atomic_helper_shutdown(dev);
 	put_device(trigger5->dmadev);
 	trigger5->dmadev = NULL;
+	trigger5_free_bulk_buffer(trigger5);
 }
 
 static const struct usb_device_id id_table[] = {

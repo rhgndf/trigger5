@@ -3,6 +3,7 @@
 #define trigger5_H
 
 #include <linux/mm_types.h>
+#include <linux/scatterlist.h>
 #include <linux/usb.h>
 
 #include <drm/drm_device.h>
@@ -40,9 +41,17 @@ struct trigger5_device {
 
 	struct drm_connector connector;
 	struct drm_simple_display_pipe display_pipe;
-	u16 frame_counter;
 
 	struct trigger5_mode_list mode_list;
+	u16 frame_counter;
+	unsigned int frame_len;
+	u8 *frame_data;
+	struct sg_table transfer_sgt;
+	struct timer_list timer;
+	struct usb_sg_request sgr;
+
+	struct work_struct transfer_work;
+	struct completion frame_complete;
 };
 
 struct trigger6_pll {
@@ -88,29 +97,10 @@ struct trigger5_bulk_header {
 	u8 checksum;
 } __attribute__((packed));
 
-struct trigger5_urb {
-	struct list_head entry;
-	struct trigger5_device *parent;
-	struct urb *urb;
-	bool is_temp;
-	bool is_last;
-};
-
+#define TRIGGER5_REQUEST_GET_MODE 0xA4
+#define TRIGGER5_REQUEST_SET_MODE 0xC3
 
 #define to_trigger5(x) container_of(x, struct trigger5_device, drm)
 
 int trigger5_connector_init(struct trigger5_device* trigger5);
-int trigger5_set_resolution(struct trigger5_device *trigger5, const struct trigger5_mode* mode);
-
-void trigger5_free_urb(struct trigger5_device *trigger5);
-int trigger5_init_urb(struct trigger5_device *trigger5, size_t total_size);
-int trigger5_power_on(struct trigger5_device *trigger5);
-int trigger5_power_off(struct trigger5_device *trigger5);
-
-void trigger5_fb_send_rect(struct drm_framebuffer *fb,
-				 const struct iosys_map *map,
-				 struct drm_rect *rect);
-
-void trigger5_free_urb(struct trigger5_device *trigger5);
-int trigger5_init_urb(struct trigger5_device *trigger5, size_t total_size);
 #endif
