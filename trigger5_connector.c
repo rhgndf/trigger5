@@ -71,14 +71,14 @@ static const struct drm_connector_funcs trigger5_connector_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
 
-int trigger5_connector_init(struct trigger5_device *trigger5)
+int trigger5_connector_init(struct trigger5_device *trigger5, int connector_type)
 {
 	int ret;
 	drm_connector_helper_add(&trigger5->connector,
 				 &trigger5_connector_helper_funcs);
 	ret = drm_connector_init(&trigger5->drm, &trigger5->connector,
 				 &trigger5_connector_funcs,
-				 DRM_MODE_CONNECTOR_HDMIA);
+				 connector_type);
 	trigger5->connector.polled =
 		DRM_CONNECTOR_POLL_CONNECT | DRM_CONNECTOR_POLL_DISCONNECT;
 	return ret;

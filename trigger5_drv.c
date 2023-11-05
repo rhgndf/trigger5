@@ -415,6 +415,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	unsigned int i;
 	struct trigger5_device *trigger5;
 	struct drm_device *dev;
+	struct usb_device *udev = interface_to_usbdev(interface);
 	int min_width = 20000, min_height = 20000;
 	int max_width = 0, max_height = 0;
 	int cur_width, cur_height;
@@ -436,8 +437,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_put_device;
 
-	usb_control_msg(interface_to_usbdev(interface),
-			usb_rcvctrlpipe(interface_to_usbdev(interface), 0),
+	usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
 			TRIGGER5_REQUEST_GET_MODE,
 			USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0, 0,
 			&trigger5->mode_list, sizeof(trigger5->mode_list),
@@ -466,7 +466,10 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 
 	INIT_WORK(&trigger5->transfer_work, trigger5_transfer_work);
 
-	ret = trigger5_connector_init(trigger5);
+	ret = trigger5_connector_init(trigger5,
+				      udev->config->desc.bNumInterfaces > 1 ?
+					      DRM_MODE_CONNECTOR_HDMIA :
+					      DRM_MODE_CONNECTOR_VGA);
 	if (ret)
 		goto err_put_device;
 
@@ -512,7 +515,70 @@ static void trigger5_usb_disconnect(struct usb_interface *interface)
 }
 
 static const struct usb_device_id id_table[] = {
-	{ USB_DEVICE_AND_INTERFACE_INFO(0x0711, 0x5800, 0xff, 0x10, 0x00) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5800, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5801, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5802, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5803, 0) },
+	{ USB_DEVICE(0x0711, 0x5804) },
+	{ USB_DEVICE(0x0711, 0x5805) },
+	{ USB_DEVICE(0x0711, 0x5806) },
+	{ USB_DEVICE(0x0711, 0x5807) },
+	{ USB_DEVICE(0x0711, 0x5808) },
+	{ USB_DEVICE(0x0711, 0x5809) },
+	{ USB_DEVICE(0x0711, 0x580A) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x580B, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x580C, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x580D, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x580E, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x580F, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5810, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5811, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5812, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5813, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5814, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5815, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5816, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5817, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5818, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5819, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x581A, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x581B, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x581C, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x581D, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x581E, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x581F, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5820, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5821, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5822, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5823, 0) },
+	{ USB_DEVICE(0x0711, 0x5824) },
+	{ USB_DEVICE(0x0711, 0x5825) },
+	{ USB_DEVICE(0x0711, 0x5826) },
+	{ USB_DEVICE(0x0711, 0x5827) },
+	{ USB_DEVICE(0x0711, 0x5828) },
+	{ USB_DEVICE(0x0711, 0x5829) },
+	{ USB_DEVICE(0x0711, 0x582A) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x582B, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x582C, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x582D, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x582E, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x582F, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5830, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5831, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5832, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5833, 0) },
+	{ USB_DEVICE(0x0711, 0x5834) },
+	{ USB_DEVICE(0x0711, 0x5835) },
+	{ USB_DEVICE(0x0711, 0x5836) },
+	{ USB_DEVICE(0x0711, 0x5837) },
+	{ USB_DEVICE(0x0711, 0x5838) },
+	{ USB_DEVICE(0x0711, 0x5839) },
+	{ USB_DEVICE(0x0711, 0x583A) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x583B, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x583C, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x583D, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x583E, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x583F, 0) },
 	{},
 };
 MODULE_DEVICE_TABLE(usb, id_table);
