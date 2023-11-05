@@ -216,6 +216,7 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 			usb_sndctrlpipe(interface_to_usbdev(trigger5->intf), 0),
 			0xc8, USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 			0x0000, 0xec34, data, 4, USB_CTRL_SET_TIMEOUT);
+		
 		kfree(data);
 	}
 }
@@ -249,7 +250,7 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 	u16 checksum = 0;
 	u8 *data = (u8 *)header;
 	int i;
-
+	
 	for (i = 0; i < sizeof(struct trigger5_bulk_header) - 1; i++) {
 		checksum += data[i];
 	}
@@ -288,6 +289,8 @@ static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
 	}
 	trigger5_free_bulk_buffer(trigger5);
 
+	// Allocate buffer for bulk transfer
+	// Buffer may be very large so use vmalloc and scatterlist
 	data = vmalloc_32(len);
 	if (!data) {
 		return -ENOMEM;
@@ -310,7 +313,6 @@ static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
 
 	trigger5->frame_len = len;
 	trigger5->frame_data = data;
-	timer_setup(&trigger5->timer, trigger5_bulk_timeout, 0);
 
 	return 0;
 	sg_free_table(&trigger5->transfer_sgt);
@@ -324,6 +326,8 @@ static void trigger5_transfer_work(struct work_struct *work)
 	struct trigger5_device *trigger5 =
 		container_of(work, struct trigger5_device, transfer_work);
 	struct usb_device *usbdev = interface_to_usbdev(trigger5->intf);
+
+	// Submit bulk transfer with timeout of 5 seconds
 	usb_sg_init(&trigger5->sgr, usbdev, usb_sndbulkpipe(usbdev, 0x01), 0,
 		    trigger5->transfer_sgt.sgl, trigger5->transfer_sgt.nents,
 		    trigger5->frame_len, GFP_KERNEL);
@@ -346,8 +350,10 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 	struct iosys_map data_map;
 
 	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
+		// Wait for previous frame to finish
 		wait_for_completion_interruptible_timeout(
 			&trigger5->frame_complete, msecs_to_jiffies(1000));
+		
 		width = state->fb->width;
 		height = state->fb->height;
 		full_rect.x1 = 0;
@@ -381,9 +387,16 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 			&data_map, trigger5->frame_data +
 					   sizeof(struct trigger5_bulk_header));
 
+		ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
+		if (ret < 0) {
+			return;
+		}
+
 		drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
 					  &shadow_plane_state->data[0],
 					  state->fb, &full_rect);
+
+		drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
 
 		queue_work(system_highpri_wq, &trigger5->transfer_work);
 
@@ -437,6 +450,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_put_device;
 
+	// Obtain array of supported modes
 	usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
 			TRIGGER5_REQUEST_GET_MODE,
 			USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0, 0,
@@ -464,8 +478,10 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	init_completion(&trigger5->frame_complete);
 	complete(&trigger5->frame_complete);
 
+	timer_setup(&trigger5->timer, trigger5_bulk_timeout, 0);
 	INIT_WORK(&trigger5->transfer_work, trigger5_transfer_work);
 
+	// Presence of audio interfaces = HDMI
 	ret = trigger5_connector_init(trigger5,
 				      udev->config->desc.bNumInterfaces > 1 ?
 					      DRM_MODE_CONNECTOR_HDMIA :
@@ -515,11 +531,11 @@ static void trigger5_usb_disconnect(struct usb_interface *interface)
 }
 
 static const struct usb_device_id id_table[] = {
-	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5800, 0) },
+	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5800, 0) }, /* HDMI */
 	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5801, 0) },
 	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5802, 0) },
 	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5803, 0) },
-	{ USB_DEVICE(0x0711, 0x5804) },
+	{ USB_DEVICE(0x0711, 0x5804) }, /* VGA */
 	{ USB_DEVICE(0x0711, 0x5805) },
 	{ USB_DEVICE(0x0711, 0x5806) },
 	{ USB_DEVICE(0x0711, 0x5807) },
