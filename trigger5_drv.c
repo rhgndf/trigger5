@@ -77,9 +77,8 @@ static const struct drm_mode_config_funcs trigger5_mode_config_funcs = {
 	.atomic_commit = drm_atomic_helper_commit,
 };
 
-static const struct trigger5_mode *
-trigger5_get_mode(struct trigger5_device *trigger5,
-		  const struct drm_display_mode *mode)
+static const int trigger5_get_mode(struct trigger5_device *trigger5,
+				   const struct drm_display_mode *mode)
 {
 	unsigned int num_modes =
 		min((u16)52, be16_to_cpu(trigger5->mode_list.count));
@@ -92,39 +91,50 @@ trigger5_get_mode(struct trigger5_device *trigger5,
 		if (le16_to_cpu(trigger5_mode->width) == mode->hdisplay &&
 		    le16_to_cpu(trigger5_mode->height) == mode->vdisplay &&
 		    trigger5_mode->hz == drm_mode_vrefresh(mode))
-			return trigger5_mode;
+			return trigger5_mode->mode_number;
 	}
-	return ERR_PTR(-EINVAL);
+
+	// Any mode is supported by setting the right parameters
+	// Return the last mode number
+	return trigger5->mode_list.modes[num_modes - 1].mode_number;
 }
 
-static void trigger6_calculate_pll(struct trigger6_pll *pll, int clock)
+static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
 {
-	long long int ref_clock = 10000000;
-	long long int target_clock = clock * 1000;
-	long long int calculated_clock, best_clock;
-	int mul1, mul2, div1, div2;
+	u64 ref_clock = 10000000;
+	u64 target_clock = clock * 1000;
+	u64 calculated_clock, calculated_err, best_err = U64_MAX;
+	int prediv, mul1, mul2, div1, div2;
 
 	// Use values found in the capture
-	for (mul1 = 0x27; mul1 <= 0x31; mul1++) {
-		for (mul2 = 0x0a; mul2 <= 0x24; mul2++) {
-			for (div1 = 0x19; div1 <= 0x32; div1++) {
-				for (div2 = 0x02; div2 <= 0x04; div2 <<= 1) {
-					calculated_clock = ref_clock * mul1 *
-							   mul2 / div1 / div2;
-					if (abs(calculated_clock -
-						target_clock) <
-					    abs(best_clock - target_clock)) {
-						best_clock = calculated_clock;
-						pll->mul1 = mul1;
-						pll->mul2 = mul2;
-						pll->div1 = div1;
-						pll->div2 = div2;
+	for (prediv = 1; prediv <= 0x10; prediv <<= 1) {
+		for (mul1 = 1; mul1 <= 0x32; mul1++) {
+			for (mul2 = 1; mul2 <= 0x32; mul2++) {
+				for (div1 = 1; div1 <= 0x32; div1++) {
+					for (div2 = 0x02; div2 <= 0x10;
+					     div2 <<= 1) {
+						calculated_clock = ref_clock *
+								   mul1 * mul2 /
+								   prediv /
+								   div1 / div2;
+						calculated_err =
+							abs(calculated_clock -
+							    target_clock);
+						if (calculated_err < best_err) {
+							best_err =
+								calculated_err;
+							pll->mul1 = mul1;
+							pll->mul2 = mul2;
+							pll->div1 = div1;
+							pll->div2 = div2;
+							pll->unknown = prediv;
+						}
 					}
 				}
 			}
 		}
 	}
-	pll->unknown = 1;
+	return best_err;
 }
 
 static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
@@ -148,7 +158,7 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 
 		request = kmalloc(sizeof(struct trigger6_mode_request),
 				  GFP_KERNEL);
-		mode_number = trigger5_get_mode(trigger5, mode)->mode_number;
+		mode_number = trigger5_get_mode(trigger5, mode);
 
 		request->height = cpu_to_be16(mode->vdisplay);
 		request->height_minus_one = cpu_to_be16(mode->vdisplay - 1);
@@ -176,7 +186,16 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 		request->vsync_polarity =
 			(mode->flags & DRM_MODE_FLAG_PVSYNC) ? 0 : 1;
 
-		trigger6_calculate_pll(&request->pll, mode->clock);
+		trigger5_calculate_pll(&request->pll, mode->clock);
+		long long int clk = 10000000LL * request->pll.mul1 *
+				    request->pll.mul2 / request->pll.unknown /
+				    request->pll.div1 / request->pll.div2 /
+				    1000;
+		drm_info(&trigger5->drm,
+			 "pll: %02x %02x %02x %02x %02x %d %d\n",
+			 request->pll.unknown, request->pll.mul1,
+			 request->pll.mul2, request->pll.div1,
+			 request->pll.div2, (int)clk, mode->clock);
 
 		usb_control_msg(
 			interface_to_usbdev(trigger5->intf),
@@ -216,7 +235,7 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 			usb_sndctrlpipe(interface_to_usbdev(trigger5->intf), 0),
 			0xc8, USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 			0x0000, 0xec34, data, 4, USB_CTRL_SET_TIMEOUT);
-		
+
 		kfree(data);
 	}
 }
@@ -230,10 +249,11 @@ enum drm_mode_status
 trigger5_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 			 const struct drm_display_mode *mode)
 {
-	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
-	const struct trigger5_mode *ret = trigger5_get_mode(trigger5, mode);
-	if (IS_ERR(ret)) {
-		return MODE_BAD;
+	struct trigger5_pll pll;
+	u64 err = trigger5_calculate_pll(&pll, mode->clock);
+	u64 ppm = err * 1000000 / mode->clock;
+	if (ppm > 10000) {
+		return MODE_CLOCK_RANGE;
 	}
 	return MODE_OK;
 }
@@ -250,7 +270,7 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 	u16 checksum = 0;
 	u8 *data = (u8 *)header;
 	int i;
-	
+
 	for (i = 0; i < sizeof(struct trigger5_bulk_header) - 1; i++) {
 		checksum += data[i];
 	}
@@ -353,7 +373,7 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 		// Wait for previous frame to finish
 		wait_for_completion_interruptible_timeout(
 			&trigger5->frame_complete, msecs_to_jiffies(1000));
-		
+
 		width = state->fb->width;
 		height = state->fb->height;
 		full_rect.x1 = 0;
@@ -387,7 +407,7 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 			&data_map, trigger5->frame_data +
 					   sizeof(struct trigger5_bulk_header));
 
-		ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
+		ret = drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE);
 		if (ret < 0) {
 			return;
 		}
@@ -396,7 +416,7 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 					  &shadow_plane_state->data[0],
 					  state->fb, &full_rect);
 
-		drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
+		drm_gem_fb_end_cpu_access(state->fb, DMA_FROM_DEVICE);
 
 		queue_work(system_highpri_wq, &trigger5->transfer_work);
 

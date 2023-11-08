@@ -14,10 +14,11 @@ static int trigger5_read_edid(void *data, u8 *buf, unsigned int block,
 	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	int ret;
 
-	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xa8,
+	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
+			      TRIGGER5_REQUEST_GET_EDID,
 			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			      block, 0x0000, buf, len, USB_CTRL_GET_TIMEOUT);
-				  
+			      block, 0, buf, len, USB_CTRL_GET_TIMEOUT);
+
 	if (ret < 0)
 		return ret;
 
@@ -45,10 +46,10 @@ trigger5_detect(struct drm_connector *connector, bool force)
 	int ret;
 	u8 status;
 
-	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xa6,
+	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
+			      TRIGGER5_REQUEST_GET_STATUS,
 			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			      0x00ff, 0x0003, status_buf, 2,
-			      USB_CTRL_GET_TIMEOUT);
+			      0xff, 0x3, status_buf, 2, USB_CTRL_GET_TIMEOUT);
 	status = status_buf[1];
 	kfree(status_buf);
 
@@ -71,14 +72,14 @@ static const struct drm_connector_funcs trigger5_connector_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
 
-int trigger5_connector_init(struct trigger5_device *trigger5, int connector_type)
+int trigger5_connector_init(struct trigger5_device *trigger5,
+			    int connector_type)
 {
 	int ret;
 	drm_connector_helper_add(&trigger5->connector,
 				 &trigger5_connector_helper_funcs);
 	ret = drm_connector_init(&trigger5->drm, &trigger5->connector,
-				 &trigger5_connector_funcs,
-				 connector_type);
+				 &trigger5_connector_funcs, connector_type);
 	trigger5->connector.polled =
 		DRM_CONNECTOR_POLL_CONNECT | DRM_CONNECTOR_POLL_DISCONNECT;
 	return ret;

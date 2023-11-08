@@ -54,7 +54,7 @@ struct trigger5_device {
 	struct completion frame_complete;
 };
 
-struct trigger6_pll {
+struct trigger5_pll {
 	u8 unknown;
 	u8 mul1;
 	u8 mul2;
@@ -77,7 +77,7 @@ struct trigger6_mode_request {
 	__be16 unknown3;
 	__be16 unknown4;
 	__be16 height_minus_one;
-	struct trigger6_pll pll;
+	struct trigger5_pll pll;
 	u8 hsync_polarity;
 	u8 vsync_polarity;
 } __attribute__((packed));
@@ -97,10 +97,12 @@ struct trigger5_bulk_header {
 	u8 checksum;
 } __attribute__((packed));
 
-#define TRIGGER5_REQUEST_GET_MODE 0xA4
-#define TRIGGER5_REQUEST_SET_MODE 0xC3
+#define TRIGGER5_REQUEST_GET_MODE   0xA4
+#define TRIGGER5_REQUEST_GET_STATUS 0xA6
+#define TRIGGER5_REQUEST_GET_EDID   0xA8
+#define TRIGGER5_REQUEST_SET_MODE   0xC3
 
 #define to_trigger5(x) container_of(x, struct trigger5_device, drm)
 
-int trigger5_connector_init(struct trigger5_device* trigger5);
+int trigger5_connector_init(struct trigger5_device* trigger5, int connector_type);
 #endif
