@@ -363,7 +363,7 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 	struct drm_plane_state *state = pipe->plane.state;
 	struct drm_shadow_plane_state *shadow_plane_state =
 		to_drm_shadow_plane_state(state);
-	struct drm_rect current_rect, full_rect;
+	struct drm_rect current_rect;
 	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
 	struct trigger5_bulk_header *header;
 	int width, height, ret;
@@ -371,15 +371,12 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 
 	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
 		// Wait for previous frame to finish
-		wait_for_completion_interruptible_timeout(
-			&trigger5->frame_complete, msecs_to_jiffies(1000));
 
-		width = state->fb->width;
-		height = state->fb->height;
-		full_rect.x1 = 0;
-		full_rect.y1 = 0;
-		full_rect.x2 = width;
-		full_rect.y2 = height;
+		wait_for_completion_timeout(
+			&trigger5->frame_complete, msecs_to_jiffies(1000));
+		
+		width = drm_rect_width(&current_rect);
+		height = drm_rect_height(&current_rect);
 
 		ret = trigger5_alloc_bulk_buffer(
 			trigger5, width * height * 3 +
@@ -393,8 +390,8 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 		header->magic = 0xfb;
 		header->length = 0x14;
 		header->counter = (trigger5->frame_counter++) & 0xfff;
-		header->horizontal_offset = cpu_to_le16(0);
-		header->vertical_offset = cpu_to_le16(0);
+		header->horizontal_offset = cpu_to_le16(current_rect.x1);
+		header->vertical_offset = cpu_to_le16(current_rect.y1);
 		header->width = cpu_to_le16(width);
 		header->height = cpu_to_le16(height);
 		header->payload_length = cpu_to_le32(width * height * 3);
@@ -414,7 +411,7 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 
 		drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
 					  &shadow_plane_state->data[0],
-					  state->fb, &full_rect);
+					  state->fb, &current_rect);
 
 		drm_gem_fb_end_cpu_access(state->fb, DMA_FROM_DEVICE);
 
