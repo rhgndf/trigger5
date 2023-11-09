@@ -11,13 +11,13 @@
 #include <drm/drm_gem.h>
 #include <drm/drm_simple_kms_helper.h>
 
-#define DRIVER_NAME		"trigger5"
-#define DRIVER_DESC		"Trigger 5"
-#define DRIVER_DATE		"20220101"
+#define DRIVER_NAME "trigger5"
+#define DRIVER_DESC "Trigger 5"
+#define DRIVER_DATE "20220101"
 
-#define DRIVER_MAJOR		0
-#define DRIVER_MINOR		0
-#define DRIVER_PATCHLEVEL	1
+#define DRIVER_MAJOR 0
+#define DRIVER_MINOR 0
+#define DRIVER_PATCHLEVEL 1
 
 struct trigger5_mode {
 	u8 hz;
@@ -34,6 +34,17 @@ struct trigger5_mode_list {
 	struct trigger5_mode modes[52];
 } __attribute__((packed));
 
+struct trigger5_sg_request {
+	struct usb_device * usbdev;
+	u8 *frame_data;
+	size_t frame_len;
+	struct sg_table transfer_sgt;
+	struct timer_list timer;
+	struct usb_sg_request sgr;
+	struct work_struct transfer_work;
+	struct trigger5_device *trigger5;
+};
+
 struct trigger5_device {
 	struct drm_device drm;
 	struct usb_interface *intf;
@@ -43,14 +54,11 @@ struct trigger5_device {
 	struct drm_simple_display_pipe display_pipe;
 
 	struct trigger5_mode_list mode_list;
-	u16 frame_counter;
-	unsigned int frame_len;
-	u8 *frame_data;
-	struct sg_table transfer_sgt;
-	struct timer_list timer;
-	struct usb_sg_request sgr;
 
-	struct work_struct transfer_work;
+	struct trigger5_sg_request sg_requests[2];
+
+	u16 frame_counter;
+
 	struct completion frame_complete;
 };
 
@@ -97,12 +105,13 @@ struct trigger5_bulk_header {
 	u8 checksum;
 } __attribute__((packed));
 
-#define TRIGGER5_REQUEST_GET_MODE   0xA4
+#define TRIGGER5_REQUEST_GET_MODE 0xA4
 #define TRIGGER5_REQUEST_GET_STATUS 0xA6
-#define TRIGGER5_REQUEST_GET_EDID   0xA8
-#define TRIGGER5_REQUEST_SET_MODE   0xC3
+#define TRIGGER5_REQUEST_GET_EDID 0xA8
+#define TRIGGER5_REQUEST_SET_MODE 0xC3
 
 #define to_trigger5(x) container_of(x, struct trigger5_device, drm)
 
-int trigger5_connector_init(struct trigger5_device* trigger5, int connector_type);
+int trigger5_connector_init(struct trigger5_device *trigger5,
+			    int connector_type);
 #endif

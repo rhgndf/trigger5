@@ -281,33 +281,50 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 
 static void trigger5_bulk_timeout(struct timer_list *t)
 {
-	struct trigger5_device *trigger5 = from_timer(trigger5, t, timer);
+	struct trigger5_sg_request *trigger5_request =
+		from_timer(trigger5_request, t, timer);
 
-	usb_sg_cancel(&trigger5->sgr);
+	usb_sg_cancel(&trigger5_request->sgr);
 }
 
-static void trigger5_free_bulk_buffer(struct trigger5_device *trigger5)
+static void
+trigger5_free_bulk_buffer(struct trigger5_sg_request *trigger5_request)
 {
-	if (!trigger5->frame_data)
+	if (!trigger5_request->frame_data)
 		return;
-	sg_free_table(&trigger5->transfer_sgt);
-	vfree(trigger5->frame_data);
-	trigger5->frame_data = NULL;
-	trigger5->frame_len = -1;
+	sg_free_table(&trigger5_request->transfer_sgt);
+	vfree(trigger5_request->frame_data);
+	trigger5_request->frame_data = NULL;
 }
-static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
-				      unsigned int len)
+
+static void trigger5_transfer_work(struct work_struct *work)
+{
+	struct trigger5_sg_request *trigger5_request =
+		container_of(work, struct trigger5_sg_request, transfer_work);
+	struct usb_device *usbdev = trigger5_request->usbdev;
+
+	// Submit bulk transfer with timeout of 5 seconds
+	usb_sg_init(&trigger5_request->sgr, usbdev,
+		    usb_sndbulkpipe(usbdev, 0x01), 0,
+		    trigger5_request->transfer_sgt.sgl,
+		    trigger5_request->transfer_sgt.nents,
+		    trigger5_request->frame_len, GFP_KERNEL);
+	mod_timer(&trigger5_request->timer, jiffies + msecs_to_jiffies(5000));
+	usb_sg_wait(&trigger5_request->sgr);
+	del_timer_sync(&trigger5_request->timer);
+	complete(&trigger5_request->trigger5->frame_complete);
+}
+
+
+static int
+trigger5_alloc_bulk_buffer(struct trigger5_sg_request *trigger5_request,
+			   unsigned int len)
 {
 	unsigned int num_pages;
 	int ret, i;
 	struct page **pages;
 	u8 *data;
 	void *ptr;
-
-	if (trigger5->frame_len == len) {
-		return 0;
-	}
-	trigger5_free_bulk_buffer(trigger5);
 
 	// Allocate buffer for bulk transfer
 	// Buffer may be very large so use vmalloc and scatterlist
@@ -324,37 +341,23 @@ static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
 	}
 	for (i = 0, ptr = data; i < num_pages; i++, ptr += PAGE_SIZE)
 		pages[i] = vmalloc_to_page(ptr);
-	ret = sg_alloc_table_from_pages(&trigger5->transfer_sgt, pages,
+	ret = sg_alloc_table_from_pages(&trigger5_request->transfer_sgt, pages,
 					num_pages, 0, len, GFP_KERNEL);
 	kfree(pages);
 	if (ret) {
 		goto err_vfree;
 	}
 
-	trigger5->frame_len = len;
-	trigger5->frame_data = data;
+	trigger5_request->frame_data = data;
+
+	timer_setup(&trigger5_request->timer, trigger5_bulk_timeout, 0);
+	INIT_WORK(&trigger5_request->transfer_work, trigger5_transfer_work);
 
 	return 0;
-	sg_free_table(&trigger5->transfer_sgt);
+	sg_free_table(&trigger5_request->transfer_sgt);
 err_vfree:
 	vfree(data);
 	return ret;
-}
-
-static void trigger5_transfer_work(struct work_struct *work)
-{
-	struct trigger5_device *trigger5 =
-		container_of(work, struct trigger5_device, transfer_work);
-	struct usb_device *usbdev = interface_to_usbdev(trigger5->intf);
-
-	// Submit bulk transfer with timeout of 5 seconds
-	usb_sg_init(&trigger5->sgr, usbdev, usb_sndbulkpipe(usbdev, 0x01), 0,
-		    trigger5->transfer_sgt.sgl, trigger5->transfer_sgt.nents,
-		    trigger5->frame_len, GFP_KERNEL);
-	mod_timer(&trigger5->timer, jiffies + msecs_to_jiffies(5000));
-	usb_sg_wait(&trigger5->sgr);
-	del_timer_sync(&trigger5->timer);
-	complete(&trigger5->frame_complete);
 }
 
 static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
@@ -366,27 +369,22 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 	struct drm_rect current_rect;
 	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
 	struct trigger5_bulk_header *header;
+	struct trigger5_sg_request *trigger5_request;
 	int width, height, ret;
 	struct iosys_map data_map;
 
 	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
 		// Wait for previous frame to finish
 
-		wait_for_completion_timeout(
-			&trigger5->frame_complete, msecs_to_jiffies(1000));
-		
+
+		trigger5_request = &trigger5->sg_requests[trigger5->frame_counter %
+							   2];
+
 		width = drm_rect_width(&current_rect);
 		height = drm_rect_height(&current_rect);
 
-		ret = trigger5_alloc_bulk_buffer(
-			trigger5, width * height * 3 +
-					  sizeof(struct trigger5_bulk_header));
-		if (ret) {
-			return;
-		}
-
 		// Only full screen updates work
-		header = (struct trigger5_bulk_header *)trigger5->frame_data;
+		header = (struct trigger5_bulk_header *)trigger5_request->frame_data;
 		header->magic = 0xfb;
 		header->length = 0x14;
 		header->counter = (trigger5->frame_counter++) & 0xfff;
@@ -401,8 +399,10 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 		header->checksum = trigger5_bulk_header_checksum(header);
 
 		iosys_map_set_vaddr(
-			&data_map, trigger5->frame_data +
+			&data_map, trigger5_request->frame_data +
 					   sizeof(struct trigger5_bulk_header));
+		trigger5_request->frame_len = width * height * 3 +
+					      sizeof(struct trigger5_bulk_header);
 
 		ret = drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE);
 		if (ret < 0) {
@@ -415,7 +415,10 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 
 		drm_gem_fb_end_cpu_access(state->fb, DMA_FROM_DEVICE);
 
-		queue_work(system_highpri_wq, &trigger5->transfer_work);
+		wait_for_completion_timeout(&trigger5->frame_complete,
+					    msecs_to_jiffies(1000));
+		
+		queue_work(system_highpri_wq, &trigger5_request->transfer_work);
 
 		/*usb_control_msg(
 			interface_to_usbdev(trigger5->intf),
@@ -489,14 +492,17 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	dev->mode_config.max_height = max_height;
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
 
+
 	trigger5->frame_counter = 0;
-	trigger5->frame_len = 0;
+	trigger5_alloc_bulk_buffer(&trigger5->sg_requests[0], 1920 * 1080 * 3 + sizeof(struct trigger5_bulk_header));
+	trigger5_alloc_bulk_buffer(&trigger5->sg_requests[1], 1920 * 1080 * 3 + sizeof(struct trigger5_bulk_header));
+	trigger5->sg_requests[0].usbdev = udev;
+	trigger5->sg_requests[1].usbdev = udev;
+	trigger5->sg_requests[0].trigger5 = trigger5;
+	trigger5->sg_requests[1].trigger5 = trigger5;
 
 	init_completion(&trigger5->frame_complete);
 	complete(&trigger5->frame_complete);
-
-	timer_setup(&trigger5->timer, trigger5_bulk_timeout, 0);
-	INIT_WORK(&trigger5->transfer_work, trigger5_transfer_work);
 
 	// Presence of audio interfaces = HDMI
 	ret = trigger5_connector_init(trigger5,
@@ -544,7 +550,8 @@ static void trigger5_usb_disconnect(struct usb_interface *interface)
 	drm_atomic_helper_shutdown(dev);
 	put_device(trigger5->dmadev);
 	trigger5->dmadev = NULL;
-	trigger5_free_bulk_buffer(trigger5);
+	trigger5_free_bulk_buffer(&trigger5->sg_requests[0]);
+	trigger5_free_bulk_buffer(&trigger5->sg_requests[1]);
 }
 
 static const struct usb_device_id id_table[] = {
