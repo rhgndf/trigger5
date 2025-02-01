@@ -34,6 +34,21 @@ struct trigger5_mode_list {
 	struct trigger5_mode modes[52];
 } __attribute__((packed));
 
+struct trigger5_transfer {
+	struct trigger5_device *trigger5;
+
+	void *frame_data;
+	size_t frame_len;
+	size_t frame_alloc_len;
+
+	struct sg_table transfer_sgt;
+	struct timer_list timer;
+	struct usb_sg_request sgr;
+
+	struct work_struct transfer_work;
+	struct completion frame_complete;
+};
+
 struct trigger5_device {
 	struct drm_device drm;
 	struct usb_interface *intf;
@@ -44,14 +59,9 @@ struct trigger5_device {
 
 	struct trigger5_mode_list mode_list;
 	u16 frame_counter;
-	unsigned int frame_len;
-	u8 *frame_data;
-	struct sg_table transfer_sgt;
-	struct timer_list timer;
-	struct usb_sg_request sgr;
 
-	struct work_struct transfer_work;
-	struct completion frame_complete;
+	int current_transfer;
+	struct trigger5_transfer transfers[2];
 };
 
 struct trigger5_pll {
