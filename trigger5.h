@@ -70,7 +70,7 @@ struct trigger5_pll {
 	u8 div2;
 } __packed;
 
-struct trigger6_mode_request {
+struct trigger5_mode_request {
 	__be16 height;
 	__be16 width;
 	__be16 line_total_pixels; /* minus one */
@@ -98,7 +98,7 @@ struct trigger5_bulk_header {
 	__le16 vertical_offset;
 	__le16 width;
 	__le16 height;
-	__le32 payload_length; /* upper 4 bits = 0x3 */
+	__le32 payload_length; /* lower 28-bit length, upper 4-bit flags */
 	u8 flags; /* 0 */
 	u8 unknown1; /* 0 */
 	u8 unknown2; /* 0 */

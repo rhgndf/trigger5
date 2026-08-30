@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/math.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
@@ -80,8 +82,8 @@ static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
 								   prediv /
 								   div1 / div2;
 						calculated_err =
-							abs(calculated_clock -
-							    target_clock);
+							abs_diff(calculated_clock,
+								 target_clock);
 						if (calculated_err < best_err) {
 							best_err =
 								calculated_err;
@@ -210,7 +212,7 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 	if (crtc_state->mode_changed) {
 		/* Sequence recovered from USB captures. */
 		u8 *data = kmalloc(4, GFP_KERNEL);
-		struct trigger6_mode_request *request =
+		struct trigger5_mode_request *request =
 			kmalloc(sizeof(*request), GFP_KERNEL);
 
 		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xd1,
@@ -234,10 +236,10 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 			cpu_to_be16(mode->vsync_end - mode->vsync_start - 1);
 		request->frame_back_porch =
 			cpu_to_be16(mode->vtotal - mode->vsync_end - 1);
-		request->unknown1 = 0xff;
-		request->unknown2 = 0xff;
-		request->unknown3 = 0xff;
-		request->unknown4 = 0xff;
+		request->unknown1 = cpu_to_be16(0xff);
+		request->unknown2 = cpu_to_be16(0xff);
+		request->unknown3 = cpu_to_be16(0xff);
+		request->unknown4 = cpu_to_be16(0xff);
 
 		request->hsync_polarity =
 			(mode->flags & DRM_MODE_FLAG_PHSYNC) ? 0 : 1;
@@ -303,11 +305,16 @@ trigger5_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 			 const struct drm_display_mode *mode)
 {
 	struct trigger5_pll pll;
-	u64 err = trigger5_calculate_pll(&pll, mode->clock);
-	u64 ppm = err * 1000000 / mode->clock;
+	u64 err, ppm;
 
+	if (!mode->clock)
+		return MODE_CLOCK_LOW;
+
+	err = trigger5_calculate_pll(&pll, mode->clock);
+	ppm = div64_u64(err * 1000, mode->clock);
 	if (ppm > 10000)
 		return MODE_CLOCK_RANGE;
+
 	return MODE_OK;
 }
 
@@ -360,7 +367,8 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 
 		header->magic = 0xfb;
 		header->length = 0x14;
-		header->counter = (trigger5->frame_counter++) & 0xfff;
+		header->counter =
+			cpu_to_le16((trigger5->frame_counter++) & 0xfff);
 		header->horizontal_offset = cpu_to_le16(current_rect.x1);
 		header->vertical_offset = cpu_to_le16(current_rect.y1);
 		header->width = cpu_to_le16(width);
