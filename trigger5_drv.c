@@ -3,6 +3,8 @@
 #include <linux/math.h>
 #include <linux/math64.h>
 #include <linux/module.h>
+#include <linux/overflow.h>
+#include <linux/sizes.h>
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
 
@@ -12,13 +14,11 @@
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fbdev_shmem.h>
-#include <drm/drm_file.h>
 #include <drm/drm_format_helper.h>
 #include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_managed.h>
-#include <drm/drm_ioctl.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_print.h>
 #include <drm/drm_simple_kms_helper.h>
@@ -77,10 +77,9 @@ static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
 				for (div1 = 1; div1 <= 0x32; div1++) {
 					for (div2 = 0x02; div2 <= 0x10;
 					     div2 <<= 1) {
-						calculated_clock = ref_clock *
-								   mul1 * mul2 /
-								   prediv /
-								   div1 / div2;
+						calculated_clock =
+							div_u64(ref_clock * mul1 * mul2,
+								prediv * div1 * div2);
 						calculated_err =
 							abs_diff(calculated_clock,
 								 target_clock);
@@ -207,92 +206,116 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
 	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	struct drm_display_mode *mode = &crtc_state->mode;
+	int ret;
 
 	if (crtc_state->mode_changed) {
+		struct trigger5_mode_request request = {};
+		u8 data[4];
+		u64 clk;
+
 		/* Sequence recovered from USB captures. */
-		u8 *data = kmalloc(4, GFP_KERNEL);
-		struct trigger5_mode_request *request =
-			kmalloc(sizeof(*request), GFP_KERNEL);
+		ret = usb_control_msg_recv(udev, 0,
+					   TRIGGER5_REQUEST_FIRMWARE_RESET,
+					   USB_DIR_IN | USB_TYPE_VENDOR |
+						   USB_RECIP_DEVICE,
+					   0x0000, 0x0000, data, 1,
+					   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+		if (ret)
+			goto err;
 
-		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xd1,
-				USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-				0x0000, 0x0000, data, 1,
-				USB_CTRL_GET_TIMEOUT);
+		request.height = cpu_to_be16(mode->vdisplay);
+		request.height_minus_one = cpu_to_be16(mode->vdisplay - 1);
+		request.width = cpu_to_be16(mode->hdisplay);
+		request.width_minus_one = cpu_to_be16(mode->hdisplay - 1);
 
-		request->height = cpu_to_be16(mode->vdisplay);
-		request->height_minus_one = cpu_to_be16(mode->vdisplay - 1);
-		request->width = cpu_to_be16(mode->hdisplay);
-		request->width_minus_one = cpu_to_be16(mode->hdisplay - 1);
-
-		request->line_total_pixels = cpu_to_be16(mode->htotal - 1);
-		request->line_sync_pulse =
+		request.line_total_pixels = cpu_to_be16(mode->htotal - 1);
+		request.line_sync_pulse =
 			cpu_to_be16(mode->hsync_end - mode->hsync_start - 1);
-		request->line_back_porch =
+		request.line_back_porch =
 			cpu_to_be16(mode->htotal - mode->hsync_end - 1);
 
-		request->frame_total_lines = cpu_to_be16(mode->vtotal - 1);
-		request->frame_sync_pulse =
+		request.frame_total_lines = cpu_to_be16(mode->vtotal - 1);
+		request.frame_sync_pulse =
 			cpu_to_be16(mode->vsync_end - mode->vsync_start - 1);
-		request->frame_back_porch =
+		request.frame_back_porch =
 			cpu_to_be16(mode->vtotal - mode->vsync_end - 1);
-		request->unknown1 = cpu_to_be16(0xff);
-		request->unknown2 = cpu_to_be16(0xff);
-		request->unknown3 = cpu_to_be16(0xff);
-		request->unknown4 = cpu_to_be16(0xff);
+		request.unknown1 = cpu_to_be16(0xff);
+		request.unknown2 = cpu_to_be16(0xff);
+		request.unknown3 = cpu_to_be16(0xff);
+		request.unknown4 = cpu_to_be16(0xff);
 
-		request->hsync_polarity =
+		request.hsync_polarity =
 			(mode->flags & DRM_MODE_FLAG_PHSYNC) ? 0 : 1;
-		request->vsync_polarity =
+		request.vsync_polarity =
 			(mode->flags & DRM_MODE_FLAG_PVSYNC) ? 0 : 1;
 
-		trigger5_calculate_pll(&request->pll, mode->clock);
-		long long clk = 10000000LL * request->pll.mul1 *
-				    request->pll.mul2 / request->pll.unknown /
-				    request->pll.div1 / request->pll.div2 /
-				    1000;
-		drm_info(&trigger5->drm,
-			 "pll: %02x %02x %02x %02x %02x %d %d\n",
-			 request->pll.unknown, request->pll.mul1,
-			 request->pll.mul2, request->pll.div1,
-			 request->pll.div2, (int)clk, mode->clock);
+		trigger5_calculate_pll(&request.pll, mode->clock);
+		clk = div_u64(10000000ULL * request.pll.mul1 *
+			      request.pll.mul2,
+			      (u32)request.pll.unknown * request.pll.div1 *
+			      request.pll.div2 * 1000);
+		drm_dbg_kms(&trigger5->drm,
+			    "pll: %02x %02x %02x %02x %02x -> %llu kHz (want %d kHz)\n",
+			    request.pll.unknown, request.pll.mul1,
+			    request.pll.mul2, request.pll.div1,
+			    request.pll.div2, clk, mode->clock);
 
-		usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
-				TRIGGER5_REQUEST_SET_MODE,
-				USB_DIR_OUT | USB_TYPE_VENDOR |
-					USB_RECIP_DEVICE,
-				0, 0, request, sizeof(*request),
-				USB_CTRL_SET_TIMEOUT);
+		ret = usb_control_msg_send(udev, 0,
+					   TRIGGER5_REQUEST_SET_MODE,
+					   USB_DIR_OUT | USB_TYPE_VENDOR |
+						   USB_RECIP_DEVICE,
+					   0, 0, &request, sizeof(request),
+					   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+		if (ret)
+			goto err;
 
-		kfree(request);
+		ret = usb_control_msg_recv(udev, 0,
+					   TRIGGER5_REQUEST_FIRMWARE_RESET,
+					   USB_DIR_IN | USB_TYPE_VENDOR |
+						   USB_RECIP_DEVICE,
+					   0x0201, 0x0000, data, 1,
+					   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+		if (ret)
+			goto err;
 
-		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xd1,
-				USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-				0x0201, 0x0000, data, 1,
-				USB_CTRL_GET_TIMEOUT);
-
-		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xa5,
-				USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-				0x0000, 0xec34, data, 4,
-				USB_CTRL_GET_TIMEOUT);
+		ret = usb_control_msg_recv(udev, 0,
+					   TRIGGER5_REQUEST_GET_REGISTER,
+					   USB_DIR_IN | USB_TYPE_VENDOR |
+						   USB_RECIP_DEVICE,
+					   0x0000, 0xec34, data, sizeof(data),
+					   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+		if (ret)
+			goto err;
 
 		data[0] = 0x60;
 		data[1] = 0x00;
 		data[2] = 0x00;
 		data[3] = 0x10;
-		usb_control_msg(udev, usb_sndctrlpipe(udev, 0), 0xc4,
-				USB_DIR_OUT | USB_TYPE_VENDOR |
-					USB_RECIP_DEVICE,
-				0x0000, 0xec34, data, 4,
-				USB_CTRL_SET_TIMEOUT);
 
-		usb_control_msg(udev, usb_sndctrlpipe(udev, 0), 0xc8,
-				USB_DIR_OUT | USB_TYPE_VENDOR |
-					USB_RECIP_DEVICE,
-				0x0000, 0xec34, data, 4,
-				USB_CTRL_SET_TIMEOUT);
+		ret = usb_control_msg_send(udev, 0,
+					   TRIGGER5_REQUEST_SET_REGISTER,
+					   USB_DIR_OUT | USB_TYPE_VENDOR |
+						   USB_RECIP_DEVICE,
+					   0x0000, 0xec34, data, sizeof(data),
+					   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+		if (ret)
+			goto err;
 
-		kfree(data);
+		ret = usb_control_msg_send(udev, 0,
+					   TRIGGER5_REQUEST_SET_CURSOR_POSITION,
+					   USB_DIR_OUT | USB_TYPE_VENDOR |
+						   USB_RECIP_DEVICE,
+					   0x0000, 0xec34, data, sizeof(data),
+					   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+		if (ret)
+			goto err;
 	}
+
+	return;
+
+err:
+	drm_err_ratelimited(&trigger5->drm,
+			    "failed to configure display mode: %d\n", ret);
 }
 
 static void trigger5_pipe_disable(struct drm_simple_display_pipe *pipe)
@@ -304,7 +327,13 @@ trigger5_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 			 const struct drm_display_mode *mode)
 {
 	struct trigger5_pll pll;
+	size_t frame_len, payload_len;
 	u64 err, ppm;
+
+	payload_len = array3_size(mode->hdisplay, mode->vdisplay, 3);
+	frame_len = size_add(payload_len, sizeof(struct trigger5_bulk_header));
+	if (frame_len > SZ_24M)
+		return MODE_MEM;
 
 	if (!mode->clock)
 		return MODE_CLOCK_LOW;
@@ -358,11 +387,14 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 			(struct trigger5_bulk_header *)
 				current_transfer->frame_data;
 		struct iosys_map data_map;
-		size_t payload_len = width * height * 3;
+		size_t payload_len = array3_size(width, height, 3);
 		int ret;
 
 		current_transfer->frame_len =
-			payload_len + sizeof(*header);
+			size_add(payload_len, sizeof(*header));
+		if (current_transfer->frame_len >
+		    current_transfer->frame_alloc_len)
+			return;
 
 		header->magic = 0xfb;
 		header->length = 0x14;
@@ -420,15 +452,11 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 			      const struct usb_device_id *id)
 {
 	int ret;
-	unsigned int i, mode_count, received_mode_count;
 	struct trigger5_device *trigger5;
 	struct usb_endpoint_descriptor *bulk_out;
 	struct drm_device *dev;
 	struct device *dma_dev;
 	struct usb_device *udev = interface_to_usbdev(interface);
-	int min_width = 20000, min_height = 20000;
-	int max_width = 0, max_height = 0;
-	int cur_width, cur_height;
 
 	trigger5 = devm_drm_dev_alloc(&interface->dev, &driver,
 				      struct trigger5_device, drm);
@@ -458,51 +486,21 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		return ret;
 
-	// Obtain array of supported modes
-	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
-			      TRIGGER5_REQUEST_GET_MODE,
-			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			      0, 0, &trigger5->mode_list,
-			      sizeof(trigger5->mode_list),
-			      USB_CTRL_GET_TIMEOUT);
-	if (ret < 0)
-		return ret;
-	if (ret < offsetof(struct trigger5_mode_list, modes))
-		return -EIO;
+	dev->mode_config.min_width = 0;
+	dev->mode_config.max_width = U16_MAX;
+	dev->mode_config.min_height = 0;
+	dev->mode_config.max_height = U16_MAX;
 
-	mode_count = min_t(unsigned int,
-			   be16_to_cpu(trigger5->mode_list.count),
-			   ARRAY_SIZE(trigger5->mode_list.modes));
-	received_mode_count =
-		((size_t)ret - offsetof(struct trigger5_mode_list, modes)) /
-		sizeof(trigger5->mode_list.modes[0]);
-	mode_count = min(mode_count, received_mode_count);
-	if (!mode_count)
-		return -ENODEV;
-
-	for (i = 0; i < mode_count; i++) {
-		cur_width = le16_to_cpu(trigger5->mode_list.modes[i].width);
-		cur_height = le16_to_cpu(trigger5->mode_list.modes[i].height);
-		min_width = min(min_width, cur_width);
-		min_height = min(min_height, cur_height);
-		max_width = max(max_width, cur_width);
-		max_height = max(max_height, cur_height);
-	}
-
-	dev->mode_config.min_width = min_width;
-	dev->mode_config.max_width = max_width;
-	dev->mode_config.min_height = min_height;
-	dev->mode_config.max_height = max_height;
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
 
 	/* Allocate buffers for bulk transfers. */
 	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[0],
-					 2048 * 2048 * 6);
+					 SZ_24M);
 	if (ret)
 		return ret;
 
 	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[1],
-					 2048 * 2048 * 6);
+					 SZ_24M);
 	if (ret)
 		goto err_alloc_0;
 	complete(&trigger5->transfers[1].frame_complete);

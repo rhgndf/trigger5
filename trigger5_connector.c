@@ -48,21 +48,18 @@ trigger5_detect(struct drm_connector *connector, bool force)
 {
 	struct trigger5_device *trigger5 = to_trigger5(connector->dev);
 	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
-	u8 *status_buf = kmalloc(2, GFP_KERNEL);
+	u8 status[2];
 	int ret;
-	u8 status;
 
-	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
-			      TRIGGER5_REQUEST_GET_STATUS,
-			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			      0xff, 0x3, status_buf, 2, USB_CTRL_GET_TIMEOUT);
-	status = status_buf[1];
-	kfree(status_buf);
-
-	if (ret < 0)
+	ret = usb_control_msg_recv(udev, 0, TRIGGER5_REQUEST_GET_STATUS,
+				   USB_DIR_IN | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0xff, 0x3, status, sizeof(status),
+				   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	if (ret)
 		return connector_status_unknown;
 
-	return status == 1 ? connector_status_connected :
+	return status[1] == 1 ? connector_status_connected :
 			     connector_status_disconnected;
 }
 

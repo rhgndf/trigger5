@@ -18,21 +18,6 @@
 #define DRIVER_MINOR		0
 #define DRIVER_PATCHLEVEL	1
 
-struct trigger5_mode {
-	u8 hz;
-	u8 clock_mhz;
-	u8 bpp;
-	u8 mode_number;
-	__le16 height;
-	__le16 width;
-} __packed;
-
-struct trigger5_mode_list {
-	__be16 count;
-	u8 padding[2];
-	struct trigger5_mode modes[52];
-} __packed;
-
 struct trigger5_transfer {
 	struct trigger5_device *trigger5;
 
@@ -56,7 +41,6 @@ struct trigger5_device {
 	struct drm_connector connector;
 	struct drm_simple_display_pipe display_pipe;
 
-	struct trigger5_mode_list mode_list;
 	u16 frame_counter;
 
 	int current_transfer;
@@ -106,10 +90,13 @@ struct trigger5_bulk_header {
 	u8 checksum;
 } __packed;
 
-#define TRIGGER5_REQUEST_GET_MODE   0xA4
-#define TRIGGER5_REQUEST_GET_STATUS 0xA6
-#define TRIGGER5_REQUEST_GET_EDID   0xA8
-#define TRIGGER5_REQUEST_SET_MODE   0xC3
+#define TRIGGER5_REQUEST_GET_REGISTER		0xA5
+#define TRIGGER5_REQUEST_GET_STATUS		0xA6
+#define TRIGGER5_REQUEST_GET_EDID		0xA8
+#define TRIGGER5_REQUEST_SET_MODE		0xC3
+#define TRIGGER5_REQUEST_SET_REGISTER		0xC4
+#define TRIGGER5_REQUEST_SET_CURSOR_POSITION	0xC8
+#define TRIGGER5_REQUEST_FIRMWARE_RESET		0xD1
 
 #define to_trigger5(x) container_of(x, struct trigger5_device, drm)
 
