@@ -44,7 +44,7 @@ static int trigger5_usb_resume(struct usb_interface *interface)
 
 DEFINE_DRM_GEM_FOPS(trigger5_driver_fops);
 
-static const struct drm_driver driver = {
+static const struct drm_driver trigger5_drm_driver = {
 	.driver_features = DRIVER_ATOMIC | DRIVER_GEM | DRIVER_MODESET,
 
 	/* GEM hooks */
@@ -213,14 +213,14 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 	u8 data[4];
 	u64 clk;
 	int ret;
-	
+
 	/* Sequence recovered from USB captures. */
 	ret = usb_control_msg_recv(udev, 0,
-					TRIGGER5_REQUEST_FIRMWARE_RESET,
-					USB_DIR_IN | USB_TYPE_VENDOR |
-						USB_RECIP_DEVICE,
-					0x0000, 0x0000, data, 1,
-					USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+				   TRIGGER5_REQUEST_FIRMWARE_RESET,
+				   USB_DIR_IN | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0x0000, 0x0000, data, 1,
+				   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
 	if (ret)
 		goto err;
 
@@ -245,46 +245,42 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 	request.unknown3 = cpu_to_be16(0xff);
 	request.unknown4 = cpu_to_be16(0xff);
 
-	request.hsync_polarity =
-		(mode->flags & DRM_MODE_FLAG_PHSYNC) ? 0 : 1;
-	request.vsync_polarity =
-		(mode->flags & DRM_MODE_FLAG_PVSYNC) ? 0 : 1;
+	request.hsync_polarity = (mode->flags & DRM_MODE_FLAG_PHSYNC) ? 0 : 1;
+	request.vsync_polarity = (mode->flags & DRM_MODE_FLAG_PVSYNC) ? 0 : 1;
 
 	trigger5_calculate_pll(&request.pll, mode->clock);
-	clk = div_u64(10000000ULL * request.pll.mul1 *
-				request.pll.mul2,
-				(u32)request.pll.prediv * request.pll.div1 *
-				request.pll.div2 * 1000);
+	clk = div_u64(10000000ULL * request.pll.mul1 * request.pll.mul2,
+		      (u32)request.pll.prediv * request.pll.div1 *
+			      request.pll.div2 * 1000);
 	drm_dbg_kms(&trigger5->drm,
-			"pll: %02x %02x %02x %02x %02x -> %llu kHz (want %d kHz)\n",
-			request.pll.prediv, request.pll.mul1,
-			request.pll.mul2, request.pll.div1,
-			request.pll.div2, clk, mode->clock);
+		    "pll: %02x %02x %02x %02x %02x -> %llu kHz (want %d kHz)\n",
+		    request.pll.prediv, request.pll.mul1, request.pll.mul2,
+		    request.pll.div1, request.pll.div2, clk, mode->clock);
 
-	ret = usb_control_msg_send(udev, 0,
-					TRIGGER5_REQUEST_SET_MODE,
-					USB_DIR_OUT | USB_TYPE_VENDOR |
-						USB_RECIP_DEVICE,
-					0, 0, &request, sizeof(request),
-					USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+	/* wValue can be any value since we are sending a custom mode */
+	ret = usb_control_msg_send(udev, 0, TRIGGER5_REQUEST_SET_MODE,
+				   USB_DIR_OUT | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0, 0, &request, sizeof(request),
+				   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
 	if (ret)
 		goto err;
 
 	ret = usb_control_msg_recv(udev, 0,
-					TRIGGER5_REQUEST_FIRMWARE_RESET,
-					USB_DIR_IN | USB_TYPE_VENDOR |
-						USB_RECIP_DEVICE,
-					0x0201, 0x0000, data, 1,
-					USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+				   TRIGGER5_REQUEST_FIRMWARE_RESET,
+				   USB_DIR_IN | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0x0201, 0x0000, data, 1,
+				   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
 	if (ret)
 		goto err;
 
 	ret = usb_control_msg_recv(udev, 0,
-					TRIGGER5_REQUEST_GET_REGISTER,
-					USB_DIR_IN | USB_TYPE_VENDOR |
-						USB_RECIP_DEVICE,
-					0x0000, 0xec34, data, sizeof(data),
-					USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+				   TRIGGER5_REQUEST_GET_REGISTER,
+				   USB_DIR_IN | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0x0000, 0xec34, data, sizeof(data),
+				   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
 	if (ret)
 		goto err;
 
@@ -294,11 +290,24 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 	data[3] = 0x10;
 
 	ret = usb_control_msg_send(udev, 0,
-					TRIGGER5_REQUEST_SET_REGISTER,
-					USB_DIR_OUT | USB_TYPE_VENDOR |
-						USB_RECIP_DEVICE,
-					0x0000, 0xec34, data, sizeof(data),
-					USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+				   TRIGGER5_REQUEST_SET_REGISTER,
+				   USB_DIR_OUT | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0x0000, 0xec34, data, sizeof(data),
+				   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		goto err;
+	data[0] = 0x01;
+	data[1] = 0x00;
+	data[2] = 0x00;
+	data[3] = 0x00;
+
+	ret = usb_control_msg_send(udev, 0,
+				   TRIGGER5_REQUEST_SET_CURSOR_POSITION,
+				   USB_DIR_OUT | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0x0000, 0xe868, data, sizeof(data),
+				   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
 	if (ret)
 		goto err;
 
@@ -486,7 +495,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	struct device *dma_dev;
 	struct usb_device *udev = interface_to_usbdev(interface);
 
-	trigger5 = devm_drm_dev_alloc(&interface->dev, &driver,
+	trigger5 = devm_drm_dev_alloc(&interface->dev, &trigger5_drm_driver,
 				      struct trigger5_device, drm);
 	if (IS_ERR(trigger5))
 		return PTR_ERR(trigger5);
@@ -514,6 +523,9 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		return ret;
 
+	/*
+	 * Ignore the mode list because the driver generates custom timings.
+	 */
 	dev->mode_config.min_width = 0;
 	dev->mode_config.max_width = 8191;
 	dev->mode_config.min_height = 0;
@@ -599,11 +611,11 @@ static void trigger5_usb_disconnect(struct usb_interface *interface)
 	struct trigger5_device *trigger5 = usb_get_intfdata(interface);
 	struct drm_device *dev = &trigger5->drm;
 
-	cancel_work_sync(&trigger5->transfers[0].transfer_work);
-	cancel_work_sync(&trigger5->transfers[1].transfer_work);
 	drm_kms_helper_poll_fini(dev);
 	drm_dev_unplug(dev);
 	drm_atomic_helper_shutdown(dev);
+	cancel_work_sync(&trigger5->transfers[0].transfer_work);
+	cancel_work_sync(&trigger5->transfers[1].transfer_work);
 	trigger5_free_bulk_buffer(&trigger5->transfers[0]);
 	trigger5_free_bulk_buffer(&trigger5->transfers[1]);
 }
