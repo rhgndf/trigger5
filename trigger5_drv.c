@@ -68,7 +68,7 @@ static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
 	u64 calculated_clock, calculated_err, best_err = U64_MAX;
 	int prediv, mul1, mul2, div1, div2;
 
-	// Use values found in the capture
+	/* Use values found in the capture */
 	for (prediv = 1; prediv <= 0x10; prediv <<= 1) {
 		for (mul1 = 1; mul1 <= 0x32; mul1++) {
 			for (mul2 = 1; mul2 <= 0x32; mul2++) {
@@ -115,7 +115,7 @@ static void trigger5_transfer_work(struct work_struct *work)
 	struct usb_device *usbdev = interface_to_usbdev(trigger5->intf);
 	int ret;
 
-	// Submit bulk transfer with timeout of 5 seconds
+	/* Submit bulk transfer with a five-second timeout. */
 	ret = usb_sg_init(&transfer->sgr, usbdev,
 			  usb_sndbulkpipe(usbdev, 0x01), 0,
 			  transfer->transfer_sgt.sgl,
@@ -166,12 +166,10 @@ static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
 	u8 *data;
 	void *ptr;
 
-	// Allocate buffer for bulk transfer
-	// Buffer may be very large so use vmalloc and scatterlist
+	/* Large transfer buffer requires vmalloc and a scatterlist. */
 	data = vmalloc_32(len);
-	if (!data) {
+	if (!data)
 		return -ENOMEM;
-	}
 
 	num_pages = DIV_ROUND_UP(len, PAGE_SIZE);
 	pages = kmalloc_array(num_pages, sizeof(struct page *), GFP_KERNEL);
@@ -184,9 +182,8 @@ static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
 	ret = sg_alloc_table_from_pages(&transfer->transfer_sgt, pages,
 					num_pages, 0, len, GFP_KERNEL);
 	kfree(pages);
-	if (ret) {
+	if (ret)
 		goto err_vfree;
-	}
 
 	transfer->frame_alloc_len = len;
 	transfer->frame_data = data;
@@ -207,19 +204,19 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 				 struct drm_plane_state *plane_state)
 {
 	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
+	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	struct drm_display_mode *mode = &crtc_state->mode;
 
 	if (crtc_state->mode_changed) {
-		// Sequence cloned from captures
+		/* Sequence recovered from USB captures. */
 		u8 *data = kmalloc(4, GFP_KERNEL);
-		struct trigger6_mode_request *request = kmalloc(
-			sizeof(struct trigger6_mode_request), GFP_KERNEL);
+		struct trigger6_mode_request *request =
+			kmalloc(sizeof(*request), GFP_KERNEL);
 
-		usb_control_msg(
-			interface_to_usbdev(trigger5->intf),
-			usb_rcvctrlpipe(interface_to_usbdev(trigger5->intf), 0),
-			0xd1, USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			0x0000, 0x0000, data, 1, USB_CTRL_GET_TIMEOUT);
+		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xd1,
+				USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+				0x0000, 0x0000, data, 1,
+				USB_CTRL_GET_TIMEOUT);
 
 		request->height = cpu_to_be16(mode->vdisplay);
 		request->height_minus_one = cpu_to_be16(mode->vdisplay - 1);
@@ -248,7 +245,7 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 			(mode->flags & DRM_MODE_FLAG_PVSYNC) ? 0 : 1;
 
 		trigger5_calculate_pll(&request->pll, mode->clock);
-		long long int clk = 10000000LL * request->pll.mul1 *
+		long long clk = 10000000LL * request->pll.mul1 *
 				    request->pll.mul2 / request->pll.unknown /
 				    request->pll.div1 / request->pll.div2 /
 				    1000;
@@ -258,43 +255,40 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 			 request->pll.mul2, request->pll.div1,
 			 request->pll.div2, (int)clk, mode->clock);
 
-		usb_control_msg(
-			interface_to_usbdev(trigger5->intf),
-			usb_sndctrlpipe(interface_to_usbdev(trigger5->intf), 0),
-			TRIGGER5_REQUEST_SET_MODE,
-			USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0, 0,
-			request, sizeof(struct trigger6_mode_request),
-			USB_CTRL_SET_TIMEOUT);
+		usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+				TRIGGER5_REQUEST_SET_MODE,
+				USB_DIR_OUT | USB_TYPE_VENDOR |
+					USB_RECIP_DEVICE,
+				0, 0, request, sizeof(*request),
+				USB_CTRL_SET_TIMEOUT);
 
 		kfree(request);
 
-		usb_control_msg(
-			interface_to_usbdev(trigger5->intf),
-			usb_rcvctrlpipe(interface_to_usbdev(trigger5->intf), 0),
-			0xd1, USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			0x0201, 0x0000, data, 1, USB_CTRL_GET_TIMEOUT);
+		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xd1,
+				USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+				0x0201, 0x0000, data, 1,
+				USB_CTRL_GET_TIMEOUT);
 
-		usb_control_msg(
-			interface_to_usbdev(trigger5->intf),
-			usb_rcvctrlpipe(interface_to_usbdev(trigger5->intf), 0),
-			0xa5, USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			0x0000, 0xec34, data, 4, USB_CTRL_GET_TIMEOUT);
+		usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), 0xa5,
+				USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+				0x0000, 0xec34, data, 4,
+				USB_CTRL_GET_TIMEOUT);
 
 		data[0] = 0x60;
 		data[1] = 0x00;
 		data[2] = 0x00;
 		data[3] = 0x10;
-		usb_control_msg(
-			interface_to_usbdev(trigger5->intf),
-			usb_sndctrlpipe(interface_to_usbdev(trigger5->intf), 0),
-			0xc4, USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			0x0000, 0xec34, data, 4, USB_CTRL_SET_TIMEOUT);
+		usb_control_msg(udev, usb_sndctrlpipe(udev, 0), 0xc4,
+				USB_DIR_OUT | USB_TYPE_VENDOR |
+					USB_RECIP_DEVICE,
+				0x0000, 0xec34, data, 4,
+				USB_CTRL_SET_TIMEOUT);
 
-		usb_control_msg(
-			interface_to_usbdev(trigger5->intf),
-			usb_sndctrlpipe(interface_to_usbdev(trigger5->intf), 0),
-			0xc8, USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			0x0000, 0xec34, data, 4, USB_CTRL_SET_TIMEOUT);
+		usb_control_msg(udev, usb_sndctrlpipe(udev, 0), 0xc8,
+				USB_DIR_OUT | USB_TYPE_VENDOR |
+					USB_RECIP_DEVICE,
+				0x0000, 0xec34, data, 4,
+				USB_CTRL_SET_TIMEOUT);
 
 		kfree(data);
 	}
@@ -302,7 +296,6 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 
 static void trigger5_pipe_disable(struct drm_simple_display_pipe *pipe)
 {
-	//struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
 }
 
 static enum drm_mode_status
@@ -312,15 +305,15 @@ trigger5_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 	struct trigger5_pll pll;
 	u64 err = trigger5_calculate_pll(&pll, mode->clock);
 	u64 ppm = err * 1000000 / mode->clock;
-	if (ppm > 10000) {
+
+	if (ppm > 10000)
 		return MODE_CLOCK_RANGE;
-	}
 	return MODE_OK;
 }
 
 static int trigger5_pipe_check(struct drm_simple_display_pipe *pipe,
-			struct drm_plane_state *new_plane_state,
-			struct drm_crtc_state *new_crtc_state)
+			       struct drm_plane_state *new_plane_state,
+			       struct drm_crtc_state *new_crtc_state)
 {
 	return 0;
 }
@@ -331,9 +324,8 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 	u8 *data = (u8 *)header;
 	int i;
 
-	for (i = 0; i < sizeof(struct trigger5_bulk_header) - 1; i++) {
+	for (i = 0; i < sizeof(struct trigger5_bulk_header) - 1; i++)
 		checksum += data[i];
-	}
 	checksum &= 0xff;
 	checksum = 0x100 - checksum;
 	return checksum & 0xff;
@@ -379,39 +371,28 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 		header->unknown2 = 0;
 		header->checksum = trigger5_bulk_header_checksum(header);
 
-		iosys_map_set_vaddr(
-			&data_map, current_transfer->frame_data +
-					   sizeof(struct trigger5_bulk_header));
+		iosys_map_set_vaddr(&data_map,
+				    current_transfer->frame_data +
+				    sizeof(struct trigger5_bulk_header));
 
 		ret = drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE);
 		if (ret < 0)
 			return;
 
-		u64 start = ktime_get_ns();
 		drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
 					  &shadow_plane_state->data[0],
 					  state->fb, &current_rect, &fmtcnv_state);
 		drm_format_conv_state_release(&fmtcnv_state);
-		u64 end = ktime_get_ns();
-		drm_info(&trigger5->drm,
-			 "drm_fb_xrgb8888_to_rgb888 took %lld ns\n",
-			 end - start);
 
 		drm_gem_fb_end_cpu_access(state->fb, DMA_FROM_DEVICE);
 
-		// Wait for previous frame to finish
+		/* Wait for previous frame to finish. */
 		if (!wait_for_completion_timeout(&prev_transfer->frame_complete,
 						 msecs_to_jiffies(10)))
 			return;
 
 		trigger5->current_transfer = !trigger5->current_transfer;
 		queue_work(system_long_wq, &current_transfer->transfer_work);
-
-		/*usb_control_msg(
-			interface_to_usbdev(trigger5->intf),
-			usb_rcvctrlpipe(interface_to_usbdev(trigger5->intf), 0),
-			0x91, USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			0x0002, 0x0000, data, 1, USB_CTRL_SET_TIMEOUT);*/
 	}
 }
 
@@ -424,7 +405,7 @@ static const struct drm_simple_display_pipe_funcs trigger5_pipe_funcs = {
 	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
 };
 
-static const uint32_t trigger5_pipe_formats[] = {
+static const u32 trigger5_pipe_formats[] = {
 	DRM_FORMAT_XRGB8888,
 };
 
@@ -499,7 +480,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	dev->mode_config.max_height = max_height;
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
 
-	// Allocate buffers for bulk transfers
+	/* Allocate buffers for bulk transfers. */
 	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[0],
 					 2048 * 2048 * 6);
 	if (ret)
@@ -511,7 +492,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 		goto err_alloc_0;
 	complete(&trigger5->transfers[1].frame_complete);
 
-	// Presence of audio interfaces = HDMI
+	/* Presence of audio interfaces indicates HDMI. */
 	ret = trigger5_connector_init(trigger5,
 				      udev->config->desc.bNumInterfaces > 1 ?
 					      DRM_MODE_CONNECTOR_HDMIA :
@@ -519,10 +500,12 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_alloc_1;
 
-	ret = drm_simple_display_pipe_init(
-		&trigger5->drm, &trigger5->display_pipe, &trigger5_pipe_funcs,
-		trigger5_pipe_formats, ARRAY_SIZE(trigger5_pipe_formats), NULL,
-		&trigger5->connector);
+	ret = drm_simple_display_pipe_init(&trigger5->drm,
+					   &trigger5->display_pipe,
+					   &trigger5_pipe_funcs,
+					   trigger5_pipe_formats,
+					   ARRAY_SIZE(trigger5_pipe_formats),
+					   NULL, &trigger5->connector);
 	if (ret)
 		goto err_alloc_1;
 

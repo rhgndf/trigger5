@@ -1,6 +1,6 @@
-
-#ifndef trigger5_H
-#define trigger5_H
+/* SPDX-License-Identifier: GPL-2.0-only */
+#ifndef __TRIGGER5_H__
+#define __TRIGGER5_H__
 
 #include <linux/mm_types.h>
 #include <linux/scatterlist.h>
@@ -25,13 +25,13 @@ struct trigger5_mode {
 	u8 mode_number;
 	__le16 height;
 	__le16 width;
-} __attribute__((packed));
+} __packed;
 
 struct trigger5_mode_list {
 	__be16 count;
 	u8 padding[2];
 	struct trigger5_mode modes[52];
-} __attribute__((packed));
+} __packed;
 
 struct trigger5_transfer {
 	struct trigger5_device *trigger5;
@@ -68,42 +68,42 @@ struct trigger5_pll {
 	u8 mul2;
 	u8 div1;
 	u8 div2;
-} __attribute__((packed));
+} __packed;
 
 struct trigger6_mode_request {
 	__be16 height;
 	__be16 width;
-	__be16 line_total_pixels; // minus one
-	__be16 line_sync_pulse; // minus one
-	__be16 line_back_porch; // minus one
+	__be16 line_total_pixels; /* minus one */
+	__be16 line_sync_pulse; /* minus one */
+	__be16 line_back_porch; /* minus one */
 	__be16 unknown1;
 	__be16 unknown2;
 	__be16 width_minus_one;
-	__be16 frame_total_lines; // minus one
-	__be16 frame_sync_pulse; // minus one
-	__be16 frame_back_porch; // minus one
+	__be16 frame_total_lines; /* minus one */
+	__be16 frame_sync_pulse; /* minus one */
+	__be16 frame_back_porch; /* minus one */
 	__be16 unknown3;
 	__be16 unknown4;
 	__be16 height_minus_one;
 	struct trigger5_pll pll;
 	u8 hsync_polarity;
 	u8 vsync_polarity;
-} __attribute__((packed));
+} __packed;
 
 struct trigger5_bulk_header {
-	u8 magic; //0xfb
-	u8 length; //0x14
-	__le16 counter; //12 bits
+	u8 magic; /* 0xfb */
+	u8 length; /* 0x14 */
+	__le16 counter; /* 12 bits */
 	__le16 horizontal_offset;
 	__le16 vertical_offset;
 	__le16 width;
 	__le16 height;
-	__le32 payload_length; //upper 4 bits = 0x3
-	u8 flags; //0
-	u8 unknown1; //0
-	u8 unknown2; //0
+	__le32 payload_length; /* upper 4 bits = 0x3 */
+	u8 flags; /* 0 */
+	u8 unknown1; /* 0 */
+	u8 unknown2; /* 0 */
 	u8 checksum;
-} __attribute__((packed));
+} __packed;
 
 #define TRIGGER5_REQUEST_GET_MODE   0xA4
 #define TRIGGER5_REQUEST_GET_STATUS 0xA6
@@ -112,5 +112,6 @@ struct trigger5_bulk_header {
 
 #define to_trigger5(x) container_of(x, struct trigger5_device, drm)
 
-int trigger5_connector_init(struct trigger5_device* trigger5, int connector_type);
-#endif
+int trigger5_connector_init(struct trigger5_device *trigger5,
+			    int connector_type);
+#endif /* __TRIGGER5_H__ */

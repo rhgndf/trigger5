@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_connector.h>
@@ -30,6 +31,7 @@ static int trigger5_connector_get_modes(struct drm_connector *connector)
 	int ret;
 	struct trigger5_device *trigger5 = to_trigger5(connector->dev);
 	const struct drm_edid *edid;
+
 	edid = drm_edid_read_custom(connector, trigger5_read_edid, trigger5);
 	if (!edid)
 		return -EINVAL;
@@ -64,6 +66,7 @@ trigger5_detect(struct drm_connector *connector, bool force)
 	return status == 1 ? connector_status_connected :
 			     connector_status_disconnected;
 }
+
 static const struct drm_connector_helper_funcs trigger5_connector_helper_funcs = {
 	.get_modes = trigger5_connector_get_modes,
 };
@@ -81,6 +84,7 @@ int trigger5_connector_init(struct trigger5_device *trigger5,
 			    int connector_type)
 {
 	int ret;
+
 	drm_connector_helper_add(&trigger5->connector,
 				 &trigger5_connector_helper_funcs);
 	ret = drm_connector_init(&trigger5->drm, &trigger5->connector,
