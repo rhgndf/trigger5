@@ -68,7 +68,7 @@ static const struct drm_mode_config_funcs trigger5_mode_config_funcs = {
 static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
 {
 	u64 ref_clock = 10000000;
-	u64 target_clock = clock * 1000;
+	u64 target_clock = (u64)clock * 1000;
 	u64 calculated_clock, calculated_err, best_err = U64_MAX;
 	int prediv, mul1, mul2, div1, div2;
 
@@ -328,7 +328,7 @@ trigger5_crtc_mode_valid(struct drm_crtc *crtc,
 
 	payload_len = array3_size(mode->hdisplay, mode->vdisplay, 3);
 	frame_len = size_add(payload_len, sizeof(struct trigger5_bulk_header));
-	if (frame_len > SZ_24M)
+	if (frame_len > SZ_16M)
 		return MODE_MEM;
 
 	if (!mode->clock)
@@ -412,6 +412,7 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 		header->magic = 0xfb;
 		header->length = 0x14;
+		/* flags 0: uncompressed 24-bit RGB888. */
 		header->counter =
 			cpu_to_le16((trigger5->frame_counter++) & 0xfff);
 		header->horizontal_offset = cpu_to_le16(current_rect.x1);
@@ -494,6 +495,8 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	struct drm_device *dev;
 	struct device *dma_dev;
 	struct usb_device *udev = interface_to_usbdev(interface);
+	/* Presence of audio interfaces indicates HDMI. */
+	bool is_hdmi = udev->config->desc.bNumInterfaces > 1;
 
 	trigger5 = devm_drm_dev_alloc(&interface->dev, &trigger5_drm_driver,
 				      struct trigger5_device, drm);
@@ -535,12 +538,12 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 
 	/* Allocate buffers for bulk transfers. */
 	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[0],
-					 SZ_24M);
+					 SZ_16M);
 	if (ret)
 		return ret;
 
 	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[1],
-					 SZ_24M);
+					 SZ_16M);
 	if (ret)
 		goto err_alloc_0;
 	complete(&trigger5->transfers[1].frame_complete);
@@ -563,9 +566,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 
 	drm_crtc_helper_add(&trigger5->crtc, &trigger5_crtc_helper_funcs);
 
-	/* Presence of audio interfaces indicates HDMI. */
-	ret = trigger5_connector_init(trigger5,
-				      udev->config->desc.bNumInterfaces > 1 ?
+	ret = trigger5_connector_init(trigger5, is_hdmi ?
 					      DRM_MODE_CONNECTOR_HDMIA :
 					      DRM_MODE_CONNECTOR_VGA);
 	if (ret)
@@ -573,7 +574,8 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 
 	trigger5->encoder.possible_crtcs = drm_crtc_mask(&trigger5->crtc);
 	ret = drm_encoder_init(dev, &trigger5->encoder, &trigger5_encoder_funcs,
-			       DRM_MODE_ENCODER_NONE, NULL);
+			       is_hdmi ? DRM_MODE_ENCODER_TMDS :
+					 DRM_MODE_ENCODER_DAC, NULL);
 	if (ret)
 		goto err_alloc_1;
 
