@@ -209,110 +209,98 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 	struct drm_crtc_state *crtc_state =
 		drm_atomic_get_new_crtc_state(state, crtc);
 	struct drm_display_mode *mode = &crtc_state->mode;
+	struct trigger5_mode_request request = {};
+	u8 data[4];
+	u64 clk;
 	int ret;
+	
+	/* Sequence recovered from USB captures. */
+	ret = usb_control_msg_recv(udev, 0,
+					TRIGGER5_REQUEST_FIRMWARE_RESET,
+					USB_DIR_IN | USB_TYPE_VENDOR |
+						USB_RECIP_DEVICE,
+					0x0000, 0x0000, data, 1,
+					USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		goto err;
 
-	if (crtc_state->mode_changed) {
-		struct trigger5_mode_request request = {};
-		u8 data[4];
-		u64 clk;
+	request.height = cpu_to_be16(mode->vdisplay);
+	request.height_minus_one = cpu_to_be16(mode->vdisplay - 1);
+	request.width = cpu_to_be16(mode->hdisplay);
+	request.width_minus_one = cpu_to_be16(mode->hdisplay - 1);
 
-		/* Sequence recovered from USB captures. */
-		ret = usb_control_msg_recv(udev, 0,
-					   TRIGGER5_REQUEST_FIRMWARE_RESET,
-					   USB_DIR_IN | USB_TYPE_VENDOR |
-						   USB_RECIP_DEVICE,
-					   0x0000, 0x0000, data, 1,
-					   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
-		if (ret)
-			goto err;
+	request.line_total_pixels = cpu_to_be16(mode->htotal - 1);
+	request.line_sync_pulse =
+		cpu_to_be16(mode->hsync_end - mode->hsync_start - 1);
+	request.line_back_porch =
+		cpu_to_be16(mode->htotal - mode->hsync_end - 1);
 
-		request.height = cpu_to_be16(mode->vdisplay);
-		request.height_minus_one = cpu_to_be16(mode->vdisplay - 1);
-		request.width = cpu_to_be16(mode->hdisplay);
-		request.width_minus_one = cpu_to_be16(mode->hdisplay - 1);
+	request.frame_total_lines = cpu_to_be16(mode->vtotal - 1);
+	request.frame_sync_pulse =
+		cpu_to_be16(mode->vsync_end - mode->vsync_start - 1);
+	request.frame_back_porch =
+		cpu_to_be16(mode->vtotal - mode->vsync_end - 1);
+	request.unknown1 = cpu_to_be16(0xff);
+	request.unknown2 = cpu_to_be16(0xff);
+	request.unknown3 = cpu_to_be16(0xff);
+	request.unknown4 = cpu_to_be16(0xff);
 
-		request.line_total_pixels = cpu_to_be16(mode->htotal - 1);
-		request.line_sync_pulse =
-			cpu_to_be16(mode->hsync_end - mode->hsync_start - 1);
-		request.line_back_porch =
-			cpu_to_be16(mode->htotal - mode->hsync_end - 1);
+	request.hsync_polarity =
+		(mode->flags & DRM_MODE_FLAG_PHSYNC) ? 0 : 1;
+	request.vsync_polarity =
+		(mode->flags & DRM_MODE_FLAG_PVSYNC) ? 0 : 1;
 
-		request.frame_total_lines = cpu_to_be16(mode->vtotal - 1);
-		request.frame_sync_pulse =
-			cpu_to_be16(mode->vsync_end - mode->vsync_start - 1);
-		request.frame_back_porch =
-			cpu_to_be16(mode->vtotal - mode->vsync_end - 1);
-		request.unknown1 = cpu_to_be16(0xff);
-		request.unknown2 = cpu_to_be16(0xff);
-		request.unknown3 = cpu_to_be16(0xff);
-		request.unknown4 = cpu_to_be16(0xff);
+	trigger5_calculate_pll(&request.pll, mode->clock);
+	clk = div_u64(10000000ULL * request.pll.mul1 *
+				request.pll.mul2,
+				(u32)request.pll.prediv * request.pll.div1 *
+				request.pll.div2 * 1000);
+	drm_dbg_kms(&trigger5->drm,
+			"pll: %02x %02x %02x %02x %02x -> %llu kHz (want %d kHz)\n",
+			request.pll.prediv, request.pll.mul1,
+			request.pll.mul2, request.pll.div1,
+			request.pll.div2, clk, mode->clock);
 
-		request.hsync_polarity =
-			(mode->flags & DRM_MODE_FLAG_PHSYNC) ? 0 : 1;
-		request.vsync_polarity =
-			(mode->flags & DRM_MODE_FLAG_PVSYNC) ? 0 : 1;
+	ret = usb_control_msg_send(udev, 0,
+					TRIGGER5_REQUEST_SET_MODE,
+					USB_DIR_OUT | USB_TYPE_VENDOR |
+						USB_RECIP_DEVICE,
+					0, 0, &request, sizeof(request),
+					USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		goto err;
 
-		trigger5_calculate_pll(&request.pll, mode->clock);
-		clk = div_u64(10000000ULL * request.pll.mul1 *
-			      request.pll.mul2,
-			      (u32)request.pll.prediv * request.pll.div1 *
-			      request.pll.div2 * 1000);
-		drm_dbg_kms(&trigger5->drm,
-			    "pll: %02x %02x %02x %02x %02x -> %llu kHz (want %d kHz)\n",
-			    request.pll.prediv, request.pll.mul1,
-			    request.pll.mul2, request.pll.div1,
-			    request.pll.div2, clk, mode->clock);
+	ret = usb_control_msg_recv(udev, 0,
+					TRIGGER5_REQUEST_FIRMWARE_RESET,
+					USB_DIR_IN | USB_TYPE_VENDOR |
+						USB_RECIP_DEVICE,
+					0x0201, 0x0000, data, 1,
+					USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		goto err;
 
-		ret = usb_control_msg_send(udev, 0,
-					   TRIGGER5_REQUEST_SET_MODE,
-					   USB_DIR_OUT | USB_TYPE_VENDOR |
-						   USB_RECIP_DEVICE,
-					   0, 0, &request, sizeof(request),
-					   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
-		if (ret)
-			goto err;
+	ret = usb_control_msg_recv(udev, 0,
+					TRIGGER5_REQUEST_GET_REGISTER,
+					USB_DIR_IN | USB_TYPE_VENDOR |
+						USB_RECIP_DEVICE,
+					0x0000, 0xec34, data, sizeof(data),
+					USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		goto err;
 
-		ret = usb_control_msg_recv(udev, 0,
-					   TRIGGER5_REQUEST_FIRMWARE_RESET,
-					   USB_DIR_IN | USB_TYPE_VENDOR |
-						   USB_RECIP_DEVICE,
-					   0x0201, 0x0000, data, 1,
-					   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
-		if (ret)
-			goto err;
+	data[0] = 0x60;
+	data[1] = 0x00;
+	data[2] = 0x00;
+	data[3] = 0x10;
 
-		ret = usb_control_msg_recv(udev, 0,
-					   TRIGGER5_REQUEST_GET_REGISTER,
-					   USB_DIR_IN | USB_TYPE_VENDOR |
-						   USB_RECIP_DEVICE,
-					   0x0000, 0xec34, data, sizeof(data),
-					   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
-		if (ret)
-			goto err;
-
-		data[0] = 0x60;
-		data[1] = 0x00;
-		data[2] = 0x00;
-		data[3] = 0x10;
-
-		ret = usb_control_msg_send(udev, 0,
-					   TRIGGER5_REQUEST_SET_REGISTER,
-					   USB_DIR_OUT | USB_TYPE_VENDOR |
-						   USB_RECIP_DEVICE,
-					   0x0000, 0xec34, data, sizeof(data),
-					   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
-		if (ret)
-			goto err;
-
-		ret = usb_control_msg_send(udev, 0,
-					   TRIGGER5_REQUEST_SET_CURSOR_POSITION,
-					   USB_DIR_OUT | USB_TYPE_VENDOR |
-						   USB_RECIP_DEVICE,
-					   0x0000, 0xec34, data, sizeof(data),
-					   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
-		if (ret)
-			goto err;
-	}
+	ret = usb_control_msg_send(udev, 0,
+					TRIGGER5_REQUEST_SET_REGISTER,
+					USB_DIR_OUT | USB_TYPE_VENDOR |
+						USB_RECIP_DEVICE,
+					0x0000, 0xec34, data, sizeof(data),
+					USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		goto err;
 
 	return;
 
@@ -527,9 +515,9 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 		return ret;
 
 	dev->mode_config.min_width = 0;
-	dev->mode_config.max_width = U16_MAX;
+	dev->mode_config.max_width = 8191;
 	dev->mode_config.min_height = 0;
-	dev->mode_config.max_height = U16_MAX;
+	dev->mode_config.max_height = 8191;
 
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
 

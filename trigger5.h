@@ -83,15 +83,15 @@ struct trigger5_mode_request {
 struct trigger5_bulk_header {
 	u8 magic; /* 0xfb */
 	u8 length; /* 0x14 */
-	__le16 counter; /* 12 bits */
-	__le16 horizontal_offset;
-	__le16 vertical_offset;
-	__le16 width;
-	__le16 height;
+	__le16 counter; /* lower 12-bit counter, upper 4-bit packet flags */
+	__le16 horizontal_offset; /* lower 13-bit offset, upper 3-bit unknown */
+	__le16 vertical_offset; /* lower 13-bit offset, upper 3-bit unknown */
+	__le16 width; /* lower 13-bit width, upper 3-bit unknown */
+	__le16 height; /* lower 13-bit height, upper 3-bit unknown */
 	__le32 payload_length; /* lower 28-bit length, upper 4-bit flags */
-	u8 flags; /* 0 */
-	u8 unknown1; /* 0 */
-	u8 unknown2; /* 0 */
+	u8 flags; /* bit 0 must be set */
+	u8 unknown1;
+	u8 unknown2;
 	u8 checksum;
 } __packed;
 

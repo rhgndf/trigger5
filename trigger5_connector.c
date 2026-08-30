@@ -22,6 +22,8 @@ static int trigger5_read_edid(void *data, u8 *buf, unsigned int block,
 
 	if (ret < 0)
 		return ret;
+	if (ret != len)
+		return -EIO;
 
 	return 0;
 }
