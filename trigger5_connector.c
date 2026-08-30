@@ -33,11 +33,10 @@ static int trigger5_connector_get_modes(struct drm_connector *connector)
 	const struct drm_edid *edid;
 
 	edid = drm_edid_read_custom(connector, trigger5_read_edid, trigger5);
-	if (!edid)
-		return -EINVAL;
 	ret = drm_edid_connector_update(connector, edid);
 	if (ret < 0)
 		goto edid_free;
+
 	ret = drm_edid_connector_add_modes(connector);
 edid_free:
 	drm_edid_free(edid);

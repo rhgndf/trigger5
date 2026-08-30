@@ -51,6 +51,7 @@ struct trigger5_transfer {
 struct trigger5_device {
 	struct drm_device drm;
 	struct usb_interface *intf;
+	unsigned int bulk_pipe;
 
 	struct drm_connector connector;
 	struct drm_simple_display_pipe display_pipe;

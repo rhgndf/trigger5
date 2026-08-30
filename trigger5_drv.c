@@ -28,16 +28,16 @@
 static int trigger5_usb_suspend(struct usb_interface *interface,
 				pm_message_t message)
 {
-	struct drm_device *dev = usb_get_intfdata(interface);
+	struct trigger5_device *trigger5 = usb_get_intfdata(interface);
 
-	return drm_mode_config_helper_suspend(dev);
+	return drm_mode_config_helper_suspend(&trigger5->drm);
 }
 
 static int trigger5_usb_resume(struct usb_interface *interface)
 {
-	struct drm_device *dev = usb_get_intfdata(interface);
+	struct trigger5_device *trigger5 = usb_get_intfdata(interface);
 
-	return drm_mode_config_helper_resume(dev);
+	return drm_mode_config_helper_resume(&trigger5->drm);
 }
 
 DEFINE_DRM_GEM_FOPS(trigger5_driver_fops);
@@ -118,8 +118,7 @@ static void trigger5_transfer_work(struct work_struct *work)
 	int ret;
 
 	/* Submit bulk transfer with a five-second timeout. */
-	ret = usb_sg_init(&transfer->sgr, usbdev,
-			  usb_sndbulkpipe(usbdev, 0x01), 0,
+	ret = usb_sg_init(&transfer->sgr, usbdev, trigger5->bulk_pipe, 0,
 			  transfer->transfer_sgt.sgl,
 			  transfer->transfer_sgt.nents, transfer->frame_len,
 			  GFP_KERNEL);
@@ -423,6 +422,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	int ret;
 	unsigned int i, mode_count, received_mode_count;
 	struct trigger5_device *trigger5;
+	struct usb_endpoint_descriptor *bulk_out;
 	struct drm_device *dev;
 	struct device *dma_dev;
 	struct usb_device *udev = interface_to_usbdev(interface);
@@ -436,6 +436,13 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 		return PTR_ERR(trigger5);
 
 	trigger5->intf = interface;
+
+	ret = usb_find_bulk_out_endpoint(interface->cur_altsetting, &bulk_out);
+	if (ret)
+		return ret;
+	trigger5->bulk_pipe =
+		usb_sndbulkpipe(udev, usb_endpoint_num(bulk_out));
+
 	dev = &trigger5->drm;
 
 	dma_dev = usb_intf_get_dma_device(interface);
@@ -632,6 +639,7 @@ static struct usb_driver trigger5_driver = {
 	.disconnect = trigger5_usb_disconnect,
 	.suspend = trigger5_usb_suspend,
 	.resume = trigger5_usb_resume,
+	.reset_resume = trigger5_usb_resume,
 	.id_table = id_table,
 };
 module_usb_driver(trigger5_driver);
