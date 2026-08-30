@@ -38,23 +38,6 @@ static int trigger5_usb_resume(struct usb_interface *interface)
 	return drm_mode_config_helper_resume(dev);
 }
 
-/*
- * FIXME: Dma-buf sharing requires DMA support by the importing device.
- *        This function is a workaround to make USB devices work as well.
- *        See todo.rst for how to fix the issue in the dma-buf framework.
- */
-static struct drm_gem_object *
-trigger5_driver_gem_prime_import(struct drm_device *dev,
-				 struct dma_buf *dma_buf)
-{
-	struct trigger5_device *trigger5 = to_trigger5(dev);
-
-	if (!trigger5->dmadev)
-		return ERR_PTR(-ENODEV);
-
-	return drm_gem_prime_import_dev(dev, dma_buf, trigger5->dmadev);
-}
-
 DEFINE_DRM_GEM_FOPS(trigger5_driver_fops);
 
 static const struct drm_driver driver = {
@@ -62,9 +45,8 @@ static const struct drm_driver driver = {
 
 	/* GEM hooks */
 	.fops = &trigger5_driver_fops,
-	.dumb_create = drm_gem_shmem_dumb_create,
+	DRM_GEM_SHMEM_DRIVER_OPS,
 	DRM_FBDEV_SHMEM_DRIVER_OPS,
-	.gem_prime_import = trigger5_driver_gem_prime_import,
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
@@ -131,15 +113,35 @@ static void trigger5_transfer_work(struct work_struct *work)
 		container_of(work, struct trigger5_transfer, transfer_work);
 	struct trigger5_device *trigger5 = transfer->trigger5;
 	struct usb_device *usbdev = interface_to_usbdev(trigger5->intf);
+	int ret;
 
 	// Submit bulk transfer with timeout of 5 seconds
-	timer_setup(&transfer->timer, trigger5_bulk_timeout, 0);
-	usb_sg_init(&transfer->sgr, usbdev, usb_sndbulkpipe(usbdev, 0x01), 0,
-		    transfer->transfer_sgt.sgl, transfer->transfer_sgt.nents,
-		    transfer->frame_len, GFP_KERNEL);
+	ret = usb_sg_init(&transfer->sgr, usbdev,
+			  usb_sndbulkpipe(usbdev, 0x01), 0,
+			  transfer->transfer_sgt.sgl,
+			  transfer->transfer_sgt.nents, transfer->frame_len,
+			  GFP_KERNEL);
+	if (ret) {
+		drm_err_ratelimited(&trigger5->drm,
+				    "failed to initialize USB transfer: %d\n",
+				    ret);
+		complete(&transfer->frame_complete);
+		return;
+	}
+
 	mod_timer(&transfer->timer, jiffies + msecs_to_jiffies(5000));
 	usb_sg_wait(&transfer->sgr);
 	timer_delete_sync(&transfer->timer);
+
+	if (transfer->sgr.status)
+		drm_err_ratelimited(&trigger5->drm,
+				    "USB transfer failed: %d\n",
+				    transfer->sgr.status);
+	else if (transfer->sgr.bytes != transfer->frame_len)
+		drm_err_ratelimited(&trigger5->drm,
+				    "short USB transfer: %zu/%zu bytes\n",
+				    transfer->sgr.bytes, transfer->frame_len);
+
 	complete(&transfer->frame_complete);
 }
 
@@ -149,6 +151,8 @@ static void trigger5_free_bulk_buffer(struct trigger5_transfer *transfer)
 		return;
 	sg_free_table(&transfer->transfer_sgt);
 	vfree(transfer->frame_data);
+	transfer->frame_data = NULL;
+	transfer->frame_len = 0;
 	transfer->frame_alloc_len = 0;
 }
 
@@ -188,11 +192,11 @@ static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
 	transfer->frame_data = data;
 
 	init_completion(&transfer->frame_complete);
+	timer_setup(&transfer->timer, trigger5_bulk_timeout, 0);
 	INIT_WORK(&transfer->transfer_work, trigger5_transfer_work);
 	transfer->trigger5 = trigger5;
 
 	return 0;
-	sg_free_table(&transfer->transfer_sgt);
 err_vfree:
 	vfree(data);
 	return ret;
@@ -356,10 +360,11 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 			(struct trigger5_bulk_header *)
 				current_transfer->frame_data;
 		struct iosys_map data_map;
+		size_t payload_len = width * height * 3;
 		int ret;
 
 		current_transfer->frame_len =
-			width * height * 3 + sizeof(*header);
+			payload_len + sizeof(*header);
 
 		header->magic = 0xfb;
 		header->length = 0x14;
@@ -368,7 +373,7 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 		header->vertical_offset = cpu_to_le16(current_rect.y1);
 		header->width = cpu_to_le16(width);
 		header->height = cpu_to_le16(height);
-		header->payload_length = cpu_to_le32(width * height * 3);
+		header->payload_length = cpu_to_le32((u32)payload_len);
 		header->flags = 0x1;
 		header->unknown1 = 0;
 		header->unknown2 = 0;
@@ -427,9 +432,10 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 			      const struct usb_device_id *id)
 {
 	int ret;
-	unsigned int i;
+	unsigned int i, mode_count, received_mode_count;
 	struct trigger5_device *trigger5;
 	struct drm_device *dev;
+	struct device *dma_dev;
 	struct usb_device *udev = interface_to_usbdev(interface);
 	int min_width = 20000, min_height = 20000;
 	int max_width = 0, max_height = 0;
@@ -443,23 +449,42 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	trigger5->intf = interface;
 	dev = &trigger5->drm;
 
-	trigger5->dmadev = usb_intf_get_dma_device(interface);
-	if (!trigger5->dmadev)
+	dma_dev = usb_intf_get_dma_device(interface);
+	if (dma_dev) {
+		drm_dev_set_dma_dev(dev, dma_dev);
+		put_device(dma_dev);
+	} else {
 		drm_warn(dev,
 			 "buffer sharing not supported"); /* not an error */
+	}
 
 	ret = drmm_mode_config_init(dev);
 	if (ret)
-		goto err_put_device;
+		return ret;
 
 	// Obtain array of supported modes
-	usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
-			TRIGGER5_REQUEST_GET_MODE,
-			USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, 0, 0,
-			&trigger5->mode_list, sizeof(trigger5->mode_list),
-			USB_CTRL_GET_TIMEOUT);
+	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
+			      TRIGGER5_REQUEST_GET_MODE,
+			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
+			      0, 0, &trigger5->mode_list,
+			      sizeof(trigger5->mode_list),
+			      USB_CTRL_GET_TIMEOUT);
+	if (ret < 0)
+		return ret;
+	if (ret < offsetof(struct trigger5_mode_list, modes))
+		return -EIO;
 
-	for (i = 0; i < be16_to_cpu(trigger5->mode_list.count); i++) {
+	mode_count = min_t(unsigned int,
+			   be16_to_cpu(trigger5->mode_list.count),
+			   ARRAY_SIZE(trigger5->mode_list.modes));
+	received_mode_count =
+		((size_t)ret - offsetof(struct trigger5_mode_list, modes)) /
+		sizeof(trigger5->mode_list.modes[0]);
+	mode_count = min(mode_count, received_mode_count);
+	if (!mode_count)
+		return -ENODEV;
+
+	for (i = 0; i < mode_count; i++) {
 		cur_width = le16_to_cpu(trigger5->mode_list.modes[i].width);
 		cur_height = le16_to_cpu(trigger5->mode_list.modes[i].height);
 		min_width = min(min_width, cur_width);
@@ -478,12 +503,12 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[0],
 					 2048 * 2048 * 6);
 	if (ret)
-		goto err_put_device;
+		return ret;
 
 	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[1],
 					 2048 * 2048 * 6);
 	if (ret)
-		goto err_put_device;
+		goto err_alloc_0;
 	complete(&trigger5->transfers[1].frame_complete);
 
 	// Presence of audio interfaces = HDMI
@@ -492,14 +517,14 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 					      DRM_MODE_CONNECTOR_HDMIA :
 					      DRM_MODE_CONNECTOR_VGA);
 	if (ret)
-		goto err_put_device;
+		goto err_alloc_1;
 
 	ret = drm_simple_display_pipe_init(
 		&trigger5->drm, &trigger5->display_pipe, &trigger5_pipe_funcs,
 		trigger5_pipe_formats, ARRAY_SIZE(trigger5_pipe_formats), NULL,
 		&trigger5->connector);
 	if (ret)
-		goto err_put_device;
+		goto err_alloc_1;
 
 	drm_plane_enable_fb_damage_clips(&trigger5->display_pipe.plane);
 
@@ -511,14 +536,19 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 
 	ret = drm_dev_register(dev, 0);
 	if (ret)
-		goto err_put_device;
+		goto err_poll_fini;
 
 	drm_client_setup(dev, NULL);
 
 	return 0;
 
-err_put_device:
-	put_device(trigger5->dmadev);
+err_poll_fini:
+	drm_kms_helper_poll_fini(dev);
+	usb_set_intfdata(interface, NULL);
+err_alloc_1:
+	trigger5_free_bulk_buffer(&trigger5->transfers[1]);
+err_alloc_0:
+	trigger5_free_bulk_buffer(&trigger5->transfers[0]);
 	return ret;
 }
 
@@ -534,8 +564,6 @@ static void trigger5_usb_disconnect(struct usb_interface *interface)
 	drm_atomic_helper_shutdown(dev);
 	trigger5_free_bulk_buffer(&trigger5->transfers[0]);
 	trigger5_free_bulk_buffer(&trigger5->transfers[1]);
-	put_device(trigger5->dmadev);
-	trigger5->dmadev = NULL;
 }
 
 static const struct usb_device_id id_table[] = {
