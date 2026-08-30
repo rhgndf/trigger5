@@ -9,7 +9,9 @@
 #include <linux/vmalloc.h>
 
 #include <drm/clients/drm_client_setup.h>
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_drv.h>
@@ -21,7 +23,7 @@
 #include <drm/drm_managed.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_print.h>
-#include <drm/drm_simple_kms_helper.h>
+#include <drm/drm_modeset_helper_vtables.h>
 
 #include "trigger5.h"
 
@@ -90,7 +92,7 @@ static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
 							pll->mul2 = mul2;
 							pll->div1 = div1;
 							pll->div2 = div2;
-							pll->unknown = prediv;
+							pll->prediv = prediv;
 						}
 					}
 				}
@@ -199,12 +201,13 @@ err_vfree:
 	return ret;
 }
 
-static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
-				 struct drm_crtc_state *crtc_state,
-				 struct drm_plane_state *plane_state)
+static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
+					struct drm_atomic_commit *state)
 {
-	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
+	struct trigger5_device *trigger5 = to_trigger5(crtc->dev);
 	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
+	struct drm_crtc_state *crtc_state =
+		drm_atomic_get_new_crtc_state(state, crtc);
 	struct drm_display_mode *mode = &crtc_state->mode;
 	int ret;
 
@@ -252,11 +255,11 @@ static void trigger5_pipe_enable(struct drm_simple_display_pipe *pipe,
 		trigger5_calculate_pll(&request.pll, mode->clock);
 		clk = div_u64(10000000ULL * request.pll.mul1 *
 			      request.pll.mul2,
-			      (u32)request.pll.unknown * request.pll.div1 *
+			      (u32)request.pll.prediv * request.pll.div1 *
 			      request.pll.div2 * 1000);
 		drm_dbg_kms(&trigger5->drm,
 			    "pll: %02x %02x %02x %02x %02x -> %llu kHz (want %d kHz)\n",
-			    request.pll.unknown, request.pll.mul1,
+			    request.pll.prediv, request.pll.mul1,
 			    request.pll.mul2, request.pll.div1,
 			    request.pll.div2, clk, mode->clock);
 
@@ -318,12 +321,8 @@ err:
 			    "failed to configure display mode: %d\n", ret);
 }
 
-static void trigger5_pipe_disable(struct drm_simple_display_pipe *pipe)
-{
-}
-
 static enum drm_mode_status
-trigger5_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
+trigger5_crtc_mode_valid(struct drm_crtc *crtc,
 			 const struct drm_display_mode *mode)
 {
 	struct trigger5_pll pll;
@@ -346,18 +345,33 @@ trigger5_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 	return MODE_OK;
 }
 
-static int trigger5_pipe_check(struct drm_simple_display_pipe *pipe,
-			       struct drm_plane_state *new_plane_state,
-			       struct drm_crtc_state *new_crtc_state)
+static int trigger5_plane_atomic_check(struct drm_plane *plane,
+				       struct drm_atomic_commit *state)
 {
-	return 0;
+	struct drm_plane_state *new_plane_state =
+		drm_atomic_get_new_plane_state(state, plane);
+	struct drm_crtc *crtc = new_plane_state->crtc;
+	struct drm_crtc_state *new_crtc_state;
+
+	if (!new_plane_state->fb)
+		return 0;
+	if (!crtc)
+		return -EINVAL;
+
+	new_crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+
+	return drm_atomic_helper_check_plane_state(new_plane_state,
+						   new_crtc_state,
+						   DRM_PLANE_NO_SCALING,
+						   DRM_PLANE_NO_SCALING,
+						   false, false);
 }
 
 static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 {
 	u16 checksum = 0;
 	u8 *data = (u8 *)header;
-	int i;
+	size_t i;
 
 	for (i = 0; i < sizeof(struct trigger5_bulk_header) - 1; i++)
 		checksum += data[i];
@@ -366,14 +380,17 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 	return checksum & 0xff;
 }
 
-static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
-				 struct drm_plane_state *old_state)
+static void trigger5_plane_atomic_update(struct drm_plane *plane,
+					 struct drm_atomic_commit *atomic_state)
 {
-	struct drm_plane_state *state = pipe->plane.state;
+	struct drm_plane_state *old_state =
+		drm_atomic_get_old_plane_state(atomic_state, plane);
+	struct drm_plane_state *state =
+		drm_atomic_get_new_plane_state(atomic_state, plane);
 	struct drm_shadow_plane_state *shadow_plane_state =
 		to_drm_shadow_plane_state(state);
 	struct drm_rect current_rect;
-	struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
+	struct trigger5_device *trigger5 = to_trigger5(plane->dev);
 	struct drm_format_conv_state fmtcnv_state = DRM_FORMAT_CONV_STATE_INIT;
 
 	if (drm_atomic_helper_damage_merged(old_state, state, &current_rect)) {
@@ -435,16 +452,39 @@ static void trigger5_pipe_update(struct drm_simple_display_pipe *pipe,
 	}
 }
 
-static const struct drm_simple_display_pipe_funcs trigger5_pipe_funcs = {
-	.enable = trigger5_pipe_enable,
-	.disable = trigger5_pipe_disable,
-	.check = trigger5_pipe_check,
-	.mode_valid = trigger5_pipe_mode_valid,
-	.update = trigger5_pipe_update,
-	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
+static const struct drm_crtc_helper_funcs trigger5_crtc_helper_funcs = {
+	.mode_valid = trigger5_crtc_mode_valid,
+	.atomic_check = drm_crtc_helper_atomic_check,
+	.atomic_enable = trigger5_crtc_atomic_enable,
 };
 
-static const u32 trigger5_pipe_formats[] = {
+static const struct drm_crtc_funcs trigger5_crtc_funcs = {
+	.reset = drm_atomic_helper_crtc_reset,
+	.destroy = drm_crtc_cleanup,
+	.set_config = drm_atomic_helper_set_config,
+	.page_flip = drm_atomic_helper_page_flip,
+	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
+};
+
+static const struct drm_plane_helper_funcs trigger5_plane_helper_funcs = {
+	DRM_GEM_SHADOW_PLANE_HELPER_FUNCS,
+	.atomic_check = trigger5_plane_atomic_check,
+	.atomic_update = trigger5_plane_atomic_update,
+};
+
+static const struct drm_plane_funcs trigger5_plane_funcs = {
+	.update_plane = drm_atomic_helper_update_plane,
+	.disable_plane = drm_atomic_helper_disable_plane,
+	.destroy = drm_plane_cleanup,
+	DRM_GEM_SHADOW_PLANE_FUNCS,
+};
+
+static const struct drm_encoder_funcs trigger5_encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
+};
+
+static const u32 trigger5_plane_formats[] = {
 	DRM_FORMAT_XRGB8888,
 };
 
@@ -505,6 +545,24 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 		goto err_alloc_0;
 	complete(&trigger5->transfers[1].frame_complete);
 
+	ret = drm_universal_plane_init(dev, &trigger5->plane, 0,
+				       &trigger5_plane_funcs,
+				       trigger5_plane_formats,
+				       ARRAY_SIZE(trigger5_plane_formats), NULL,
+				       DRM_PLANE_TYPE_PRIMARY, NULL);
+	if (ret)
+		goto err_alloc_1;
+
+	drm_plane_helper_add(&trigger5->plane, &trigger5_plane_helper_funcs);
+	drm_plane_enable_fb_damage_clips(&trigger5->plane);
+
+	ret = drm_crtc_init_with_planes(dev, &trigger5->crtc, &trigger5->plane,
+					NULL, &trigger5_crtc_funcs, NULL);
+	if (ret)
+		goto err_alloc_1;
+
+	drm_crtc_helper_add(&trigger5->crtc, &trigger5_crtc_helper_funcs);
+
 	/* Presence of audio interfaces indicates HDMI. */
 	ret = trigger5_connector_init(trigger5,
 				      udev->config->desc.bNumInterfaces > 1 ?
@@ -513,16 +571,16 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_alloc_1;
 
-	ret = drm_simple_display_pipe_init(&trigger5->drm,
-					   &trigger5->display_pipe,
-					   &trigger5_pipe_funcs,
-					   trigger5_pipe_formats,
-					   ARRAY_SIZE(trigger5_pipe_formats),
-					   NULL, &trigger5->connector);
+	trigger5->encoder.possible_crtcs = drm_crtc_mask(&trigger5->crtc);
+	ret = drm_encoder_init(dev, &trigger5->encoder, &trigger5_encoder_funcs,
+			       DRM_MODE_ENCODER_NONE, NULL);
 	if (ret)
 		goto err_alloc_1;
 
-	drm_plane_enable_fb_damage_clips(&trigger5->display_pipe.plane);
+	ret = drm_connector_attach_encoder(&trigger5->connector,
+					   &trigger5->encoder);
+	if (ret)
+		goto err_alloc_1;
 
 	drm_mode_config_reset(dev);
 

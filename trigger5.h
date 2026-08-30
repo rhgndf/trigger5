@@ -9,10 +9,13 @@
 #include <drm/drm_device.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem.h>
-#include <drm/drm_simple_kms_helper.h>
+#include <drm/drm_connector.h>
+#include <drm/drm_crtc.h>
+#include <drm/drm_encoder.h>
+#include <drm/drm_plane.h>
 
 #define DRIVER_NAME		"trigger5"
-#define DRIVER_DESC		"Trigger 5"
+#define DRIVER_DESC		"MCT Trigger 5 USB display adapter"
 
 #define DRIVER_MAJOR		0
 #define DRIVER_MINOR		0
@@ -39,7 +42,9 @@ struct trigger5_device {
 	unsigned int bulk_pipe;
 
 	struct drm_connector connector;
-	struct drm_simple_display_pipe display_pipe;
+	struct drm_plane plane;
+	struct drm_crtc crtc;
+	struct drm_encoder encoder;
 
 	u16 frame_counter;
 
@@ -48,7 +53,7 @@ struct trigger5_device {
 };
 
 struct trigger5_pll {
-	u8 unknown;
+	u8 prediv;
 	u8 mul1;
 	u8 mul2;
 	u8 div1;
