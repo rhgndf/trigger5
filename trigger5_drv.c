@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/module.h>
+#include <linux/timer.h>
 #include <linux/vmalloc.h>
 
+#include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fb_helper.h>
-#include <drm/drm_fbdev_ttm.h>
+#include <drm/drm_fbdev_shmem.h>
 #include <drm/drm_file.h>
 #include <drm/drm_format_helper.h>
 #include <drm/drm_gem_atomic_helper.h>
@@ -61,12 +62,12 @@ static const struct drm_driver driver = {
 
 	/* GEM hooks */
 	.fops = &trigger5_driver_fops,
-	DRM_GEM_SHMEM_DRIVER_OPS,
+	.dumb_create = drm_gem_shmem_dumb_create,
+	DRM_FBDEV_SHMEM_DRIVER_OPS,
 	.gem_prime_import = trigger5_driver_gem_prime_import,
 
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
-	.date = DRIVER_DATE,
 	.major = DRIVER_MAJOR,
 	.minor = DRIVER_MINOR,
 	.patchlevel = DRIVER_PATCHLEVEL,
@@ -118,7 +119,8 @@ static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
 
 static void trigger5_bulk_timeout(struct timer_list *t)
 {
-	struct trigger5_transfer *transfer = from_timer(transfer, t, timer);
+	struct trigger5_transfer *transfer =
+		timer_container_of(transfer, t, timer);
 
 	usb_sg_cancel(&transfer->sgr);
 }
@@ -137,7 +139,7 @@ static void trigger5_transfer_work(struct work_struct *work)
 		    transfer->frame_len, GFP_KERNEL);
 	mod_timer(&transfer->timer, jiffies + msecs_to_jiffies(5000));
 	usb_sg_wait(&transfer->sgr);
-	del_timer_sync(&transfer->timer);
+	timer_delete_sync(&transfer->timer);
 	complete(&transfer->frame_complete);
 }
 
@@ -299,7 +301,7 @@ static void trigger5_pipe_disable(struct drm_simple_display_pipe *pipe)
 	//struct trigger5_device *trigger5 = to_trigger5(pipe->crtc.dev);
 }
 
-enum drm_mode_status
+static enum drm_mode_status
 trigger5_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 			 const struct drm_display_mode *mode)
 {
@@ -312,7 +314,7 @@ trigger5_pipe_mode_valid(struct drm_simple_display_pipe *pipe,
 	return MODE_OK;
 }
 
-int trigger5_pipe_check(struct drm_simple_display_pipe *pipe,
+static int trigger5_pipe_check(struct drm_simple_display_pipe *pipe,
 			struct drm_plane_state *new_plane_state,
 			struct drm_crtc_state *new_crtc_state)
 {
@@ -511,7 +513,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_put_device;
 
-	drm_fbdev_ttm_setup(dev, 0);
+	drm_client_setup(dev, NULL);
 
 	return 0;
 
@@ -614,4 +616,5 @@ static struct usb_driver trigger5_driver = {
 	.id_table = id_table,
 };
 module_usb_driver(trigger5_driver);
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");

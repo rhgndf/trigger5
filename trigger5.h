@@ -13,7 +13,6 @@
 
 #define DRIVER_NAME		"trigger5"
 #define DRIVER_DESC		"Trigger 5"
-#define DRIVER_DATE		"20220101"
 
 #define DRIVER_MAJOR		0
 #define DRIVER_MINOR		0
