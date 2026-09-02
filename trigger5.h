@@ -2,15 +2,16 @@
 #ifndef __TRIGGER5_H__
 #define __TRIGGER5_H__
 
-#include <linux/mm_types.h>
+#include <linux/completion.h>
 #include <linux/scatterlist.h>
+#include <linux/timer.h>
+#include <linux/types.h>
 #include <linux/usb.h>
+#include <linux/workqueue.h>
 
-#include <drm/drm_device.h>
-#include <drm/drm_framebuffer.h>
-#include <drm/drm_gem.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_device.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_plane.h>
 
@@ -49,6 +50,7 @@ struct trigger5_device {
 	u16 frame_counter;
 
 	int current_transfer;
+	struct workqueue_struct *transfer_wq;
 	struct trigger5_transfer transfers[2];
 };
 

@@ -2,6 +2,7 @@
 
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_connector.h>
+#include <drm/drm_drv.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_probe_helper.h>
@@ -12,13 +13,18 @@ static int trigger5_read_edid(void *data, u8 *buf, unsigned int block,
 			      size_t len)
 {
 	struct trigger5_device *trigger5 = data;
-	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
-	int ret;
+	struct usb_device *udev;
+	int idx, ret;
 
+	if (!drm_dev_enter(&trigger5->drm, &idx))
+		return -ENODEV;
+
+	udev = interface_to_usbdev(trigger5->intf);
 	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
 			      TRIGGER5_REQUEST_GET_EDID,
 			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 			      block, 0, buf, len, USB_CTRL_GET_TIMEOUT);
+	drm_dev_exit(idx);
 
 	if (ret < 0)
 		return ret;
@@ -49,15 +55,21 @@ static enum drm_connector_status
 trigger5_detect(struct drm_connector *connector, bool force)
 {
 	struct trigger5_device *trigger5 = to_trigger5(connector->dev);
-	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
+	struct usb_device *udev;
 	u8 status[2];
-	int ret;
+	int idx, ret;
 
+	if (!drm_dev_enter(&trigger5->drm, &idx))
+		return connector_status_disconnected;
+
+	udev = interface_to_usbdev(trigger5->intf);
 	ret = usb_control_msg_recv(udev, 0, TRIGGER5_REQUEST_GET_STATUS,
 				   USB_DIR_IN | USB_TYPE_VENDOR |
 					   USB_RECIP_DEVICE,
 				   0xff, 0x3, status, sizeof(status),
 				   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	drm_dev_exit(idx);
+
 	if (ret)
 		return connector_status_unknown;
 
