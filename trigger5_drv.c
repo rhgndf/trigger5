@@ -168,11 +168,11 @@ static void trigger5_free_bulk_buffer(struct trigger5_transfer *transfer)
 	transfer->frame_alloc_len = 0;
 }
 
-static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
-				      struct trigger5_transfer *transfer,
-				      size_t len)
+static int trigger5_resize_bulk_buffer(struct trigger5_transfer *transfer,
+				       size_t len)
 {
 	unsigned int num_pages;
+	struct sg_table transfer_sgt;
 	int ret, i;
 	struct page **pages;
 	u8 *data;
@@ -191,25 +191,33 @@ static int trigger5_alloc_bulk_buffer(struct trigger5_device *trigger5,
 	}
 	for (i = 0, ptr = data; i < num_pages; i++, ptr += PAGE_SIZE)
 		pages[i] = vmalloc_to_page(ptr);
-	ret = sg_alloc_table_from_pages(&transfer->transfer_sgt, pages,
+	ret = sg_alloc_table_from_pages(&transfer_sgt, pages,
 					num_pages, 0, len, GFP_KERNEL);
 	kfree(pages);
 	if (ret)
 		goto err_vfree;
 
-	transfer->frame_alloc_len = len;
+	/* Allocate a replacement before releasing the current buffer. */
+	sg_free_table(&transfer->transfer_sgt);
+	transfer->transfer_sgt = transfer_sgt;
+	vfree(transfer->frame_data);
 	transfer->frame_data = data;
-
-	init_completion(&transfer->frame_complete);
-	complete(&transfer->frame_complete);
-	timer_setup(&transfer->timer, trigger5_bulk_timeout, 0);
-	INIT_WORK(&transfer->transfer_work, trigger5_transfer_work);
-	transfer->trigger5 = trigger5;
+	transfer->frame_alloc_len = len;
 
 	return 0;
 err_vfree:
 	vfree(data);
 	return ret;
+}
+
+static void trigger5_init_transfer(struct trigger5_device *trigger5,
+				   struct trigger5_transfer *transfer)
+{
+	init_completion(&transfer->frame_complete);
+	complete(&transfer->frame_complete);
+	timer_setup(&transfer->timer, trigger5_bulk_timeout, 0);
+	INIT_WORK(&transfer->transfer_work, trigger5_transfer_work);
+	transfer->trigger5 = trigger5;
 }
 
 static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
@@ -304,7 +312,6 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 	data[1] = 0x00;
 	data[2] = 0x00;
 	data[3] = 0x10;
-
 	ret = usb_control_msg_send(udev, 0,
 				   TRIGGER5_REQUEST_SET_REGISTER,
 				   USB_DIR_OUT | USB_TYPE_VENDOR |
@@ -313,11 +320,11 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 				   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
 	if (ret)
 		goto err;
+
 	data[0] = 0x01;
 	data[1] = 0x00;
 	data[2] = 0x00;
 	data[3] = 0x00;
-
 	ret = usb_control_msg_send(udev, 0,
 				   TRIGGER5_REQUEST_SET_CURSOR_POSITION,
 				   USB_DIR_OUT | USB_TYPE_VENDOR |
@@ -395,6 +402,14 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 	return checksum & 0xff;
 }
 
+static void trigger5_merge_rect(struct drm_rect *r1, struct drm_rect *r2)
+{
+	r1->x1 = min(r1->x1, r2->x1);
+	r1->y1 = min(r1->y1, r2->y1);
+	r1->x2 = max(r1->x2, r2->x2);
+	r1->y2 = max(r1->y2, r2->y2);
+}
+
 static void trigger5_plane_atomic_update(struct drm_plane *plane,
 					 struct drm_atomic_commit *atomic_state)
 {
@@ -406,11 +421,11 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 		to_drm_shadow_plane_state(state);
 	struct trigger5_device *trigger5 = to_trigger5(plane->dev);
 	struct drm_format_conv_state fmtcnv_state = DRM_FORMAT_CONV_STATE_INIT;
-	struct trigger5_transfer *current_transfer;
+	struct trigger5_transfer *current_transfer, *previous_transfer;
 	struct trigger5_bulk_header *header;
-	struct drm_rect current_rect;
+	struct drm_rect current_rect, src_rect;
 	struct iosys_map data_map;
-	size_t frame_len, payload_len;
+	size_t frame_len, payload_len, max_len;
 	int width, height;
 	int idx, ret;
 
@@ -422,15 +437,52 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 	current_transfer =
 		&trigger5->transfers[trigger5->current_transfer];
+	previous_transfer = &trigger5->transfers[1 - trigger5->current_transfer];
+
+	src_rect = drm_plane_state_src(state);
+
+	/* Match drm_atomic_helper_damage_iter_init() rounding. */
+	src_rect.x1 >>= 16;
+	src_rect.y1 >>= 16;
+	src_rect.x2 = (src_rect.x2 >> 16) + !!(src_rect.x2 & 0xffff);
+	src_rect.y2 = (src_rect.y2 >> 16) + !!(src_rect.y2 & 0xffff);
+
+	/* Latency reduction: requeue with the latest frame data. */
+	if (cancel_work(&previous_transfer->transfer_work)) {
+		complete(&previous_transfer->frame_complete);
+
+		trigger5_merge_rect(&current_rect, &previous_transfer->transfer_rect);
+
+		/* Clip merged damage to the new resolution. */
+		if (!drm_rect_intersect(&current_rect, &src_rect))
+			goto exit;
+
+		current_transfer = previous_transfer;
+		trigger5->current_transfer = !trigger5->current_transfer;
+	}
+
 	width = drm_rect_width(&current_rect);
 	height = drm_rect_height(&current_rect);
 	payload_len = array3_size(width, height, 3);
 	frame_len = size_add(payload_len, sizeof(*header));
-	if (frame_len > current_transfer->frame_alloc_len)
-		goto exit;
+	current_transfer->transfer_rect = current_rect;
 
 	if (!wait_for_completion_timeout(&current_transfer->frame_complete,
 					 msecs_to_jiffies(10)))
+		goto exit;
+
+	/* Resize buffer to the current resolution. */
+	max_len = array3_size(drm_rect_width(&src_rect),
+			      drm_rect_height(&src_rect), 3);
+	max_len = size_add(max_len, sizeof(*header));
+	/*
+	 * Allocation failure leaves the old buffer available for smaller
+	 * partial updates.
+	 */
+	if (max_len != current_transfer->frame_alloc_len)
+		trigger5_resize_bulk_buffer(current_transfer, max_len);
+
+	if (frame_len > current_transfer->frame_alloc_len)
 		goto exit;
 
 	current_transfer->frame_len = frame_len;
@@ -550,7 +602,8 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 		return ret;
 
 	/*
-	 * Ignore the mode list because the driver generates custom timings.
+	 * The device has a built-in mode list, however we ignore
+	 * the mode list because the device accepts custom modes
 	 */
 	dev->mode_config.min_width = 0;
 	dev->mode_config.max_width = 8191;
@@ -559,14 +612,15 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
 
-	/* Allocate buffers for bulk transfers. */
-	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[0],
-					 SZ_16M);
+	trigger5_init_transfer(trigger5, &trigger5->transfers[0]);
+	trigger5_init_transfer(trigger5, &trigger5->transfers[1]);
+
+	/* The first transfer resizes them for the active mode. */
+	ret = trigger5_resize_bulk_buffer(&trigger5->transfers[0], SZ_64K);
 	if (ret)
 		return ret;
 
-	ret = trigger5_alloc_bulk_buffer(trigger5, &trigger5->transfers[1],
-					 SZ_16M);
+	ret = trigger5_resize_bulk_buffer(&trigger5->transfers[1], SZ_64K);
 	if (ret)
 		goto err_alloc_0;
 

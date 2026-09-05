@@ -28,6 +28,7 @@ struct trigger5_transfer {
 	void *frame_data;
 	size_t frame_len;
 	size_t frame_alloc_len;
+	struct drm_rect transfer_rect;
 
 	struct sg_table transfer_sgt;
 	struct timer_list timer;
