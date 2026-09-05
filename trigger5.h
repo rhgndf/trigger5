@@ -14,13 +14,14 @@
 #include <drm/drm_device.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_plane.h>
+#include <drm/drm_rect.h>
 
 #define DRIVER_NAME		"trigger5"
 #define DRIVER_DESC		"MCT Trigger 5 USB display adapter"
 
-#define DRIVER_MAJOR		0
+#define DRIVER_MAJOR		1
 #define DRIVER_MINOR		0
-#define DRIVER_PATCHLEVEL	1
+#define DRIVER_PATCHLEVEL	0
 
 struct trigger5_transfer {
 	struct trigger5_device *trigger5;
@@ -108,6 +109,8 @@ struct trigger5_bulk_header {
 #define TRIGGER5_REQUEST_SET_REGISTER		0xC4
 #define TRIGGER5_REQUEST_SET_CURSOR_POSITION	0xC8
 #define TRIGGER5_REQUEST_FIRMWARE_RESET		0xD1
+
+#define TRIGGER5_KEEPALIVE_INTERVAL_MS	2000
 
 #define to_trigger5(x) container_of(x, struct trigger5_device, drm)
 

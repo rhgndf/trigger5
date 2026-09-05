@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/array_size.h>
 #include <linux/iosys-map.h>
 #include <linux/jiffies.h>
+#include <linux/limits.h>
 #include <linux/math.h>
 #include <linux/math64.h>
 #include <linux/module.h>
@@ -20,19 +22,26 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_fbdev_shmem.h>
 #include <drm/drm_format_helper.h>
+#include <drm/drm_fourcc.h>
+#include <drm/drm_gem.h>
 #include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_managed.h>
+#include <drm/drm_modeset_helper.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_print.h>
 #include <drm/drm_modeset_helper_vtables.h>
 
 #include "trigger5.h"
 
-#define TRIGGER5_KEEPALIVE_INTERVAL_MS	2000
 
-static void trigger5_stop_io(struct trigger5_device *trigger5);
+static void trigger5_stop_io(struct trigger5_device *trigger5)
+{
+	WRITE_ONCE(trigger5->display_enabled, false);
+	cancel_delayed_work_sync(&trigger5->keepalive_work);
+	flush_workqueue(trigger5->transfer_wq);
+}
 
 static int trigger5_usb_suspend(struct usb_interface *interface,
 				pm_message_t message)
@@ -77,6 +86,11 @@ static const struct drm_mode_config_funcs trigger5_mode_config_funcs = {
 	.fb_create = drm_gem_fb_create_with_dirty,
 	.atomic_check = drm_atomic_helper_check,
 	.atomic_commit = drm_atomic_helper_commit,
+};
+
+static const struct drm_mode_config_helper_funcs
+trigger5_mode_config_helper_funcs = {
+	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm,
 };
 
 static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
@@ -200,13 +214,6 @@ static void trigger5_keepalive_work(struct work_struct *work)
 				 msecs_to_jiffies(TRIGGER5_KEEPALIVE_INTERVAL_MS));
 
 	drm_dev_exit(idx);
-}
-
-static void trigger5_stop_io(struct trigger5_device *trigger5)
-{
-	WRITE_ONCE(trigger5->display_enabled, false);
-	cancel_delayed_work_sync(&trigger5->keepalive_work);
-	flush_workqueue(trigger5->transfer_wq);
 }
 
 static void trigger5_free_bulk_buffer(struct trigger5_transfer *transfer)
@@ -421,13 +428,24 @@ trigger5_crtc_mode_valid(struct drm_crtc *crtc,
 	size_t frame_len, payload_len;
 	u64 err, ppm;
 
+	/*
+	 * The protocol stores totals, sync pulses, and back porches minus one
+	 * in 16-bit fields.
+	 */
+	if (mode->hsync_end <= mode->hsync_start ||
+	    mode->htotal <= mode->hsync_end ||
+	    mode->htotal > U16_MAX + 1)
+		return MODE_H_ILLEGAL;
+
+	if (mode->vsync_end <= mode->vsync_start ||
+	    mode->vtotal <= mode->vsync_end ||
+	    mode->vtotal > U16_MAX + 1)
+		return MODE_V_ILLEGAL;
+
 	payload_len = array3_size(mode->hdisplay, mode->vdisplay, 3);
 	frame_len = size_add(payload_len, sizeof(struct trigger5_bulk_header));
 	if (frame_len > SZ_16M)
 		return MODE_MEM;
-
-	if (!mode->clock)
-		return MODE_CLOCK_LOW;
 
 	err = trigger5_calculate_pll(&pll, mode->clock);
 	ppm = div64_u64(err * 1000, mode->clock);
@@ -490,7 +508,6 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 	struct drm_shadow_plane_state *shadow_plane_state =
 		to_drm_shadow_plane_state(state);
 	struct trigger5_device *trigger5 = to_trigger5(plane->dev);
-	struct drm_format_conv_state fmtcnv_state = DRM_FORMAT_CONV_STATE_INIT;
 	struct trigger5_transfer *current_transfer, *previous_transfer;
 	struct trigger5_bulk_header *header;
 	struct drm_rect current_rect, src_rect;
@@ -586,8 +603,8 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 	drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
 				  &shadow_plane_state->data[0],
-				  state->fb, &current_rect, &fmtcnv_state);
-	drm_format_conv_state_release(&fmtcnv_state);
+				  state->fb, &current_rect,
+				  &shadow_plane_state->fmtcnv_state);
 
 	drm_gem_fb_end_cpu_access(state->fb, DMA_FROM_DEVICE);
 
@@ -644,7 +661,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	struct drm_device *dev;
 	struct device *dma_dev;
 	struct usb_device *udev = interface_to_usbdev(interface);
-	/* Presence of audio interfaces indicates HDMI. */
+	/* Heuristic: Presence of audio interfaces indicates HDMI. */
 	bool is_hdmi = udev->config->desc.bNumInterfaces > 1;
 
 	trigger5 = devm_drm_dev_alloc(&interface->dev, &trigger5_drm_driver,
@@ -679,12 +696,13 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	 * The device has a built-in mode list, however we ignore
 	 * the mode list because the device accepts custom modes
 	 */
-	dev->mode_config.min_width = 0;
+	dev->mode_config.min_width = 1;
 	dev->mode_config.max_width = 8191;
-	dev->mode_config.min_height = 0;
+	dev->mode_config.min_height = 1;
 	dev->mode_config.max_height = 8191;
 
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
+	dev->mode_config.helper_private = &trigger5_mode_config_helper_funcs;
 
 	trigger5_init_transfer(trigger5, &trigger5->transfers[0]);
 	trigger5_init_transfer(trigger5, &trigger5->transfers[1]);
