@@ -52,6 +52,8 @@ struct trigger5_device {
 
 	int current_transfer;
 	struct workqueue_struct *transfer_wq;
+	bool display_enabled;
+	struct delayed_work keepalive_work;
 	struct trigger5_transfer transfers[2];
 };
 
@@ -98,6 +100,7 @@ struct trigger5_bulk_header {
 	u8 checksum;
 } __packed;
 
+#define TRIGGER5_REQUEST_KEEPALIVE		0x91
 #define TRIGGER5_REQUEST_GET_REGISTER		0xA5
 #define TRIGGER5_REQUEST_GET_STATUS		0xA6
 #define TRIGGER5_REQUEST_GET_EDID		0xA8

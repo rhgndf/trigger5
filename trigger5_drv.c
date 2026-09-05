@@ -30,12 +30,23 @@
 
 #include "trigger5.h"
 
+#define TRIGGER5_KEEPALIVE_INTERVAL_MS	2000
+
+static void trigger5_stop_io(struct trigger5_device *trigger5);
+
 static int trigger5_usb_suspend(struct usb_interface *interface,
 				pm_message_t message)
 {
 	struct trigger5_device *trigger5 = usb_get_intfdata(interface);
+	int ret;
 
-	return drm_mode_config_helper_suspend(&trigger5->drm);
+	ret = drm_mode_config_helper_suspend(&trigger5->drm);
+	if (ret)
+		return ret;
+
+	trigger5_stop_io(trigger5);
+
+	return 0;
 }
 
 static int trigger5_usb_resume(struct usb_interface *interface)
@@ -157,6 +168,47 @@ complete:
 	complete(&transfer->frame_complete);
 }
 
+static void trigger5_keepalive_work(struct work_struct *work)
+{
+	struct trigger5_device *trigger5 =
+		container_of(to_delayed_work(work), struct trigger5_device,
+			     keepalive_work);
+	struct usb_device *udev;
+	u8 response;
+	int idx, ret;
+
+	if (!READ_ONCE(trigger5->display_enabled))
+		return;
+
+	if (!drm_dev_enter(&trigger5->drm, &idx))
+		return;
+
+	udev = interface_to_usbdev(trigger5->intf);
+	ret = usb_control_msg_recv(udev, 0, TRIGGER5_REQUEST_KEEPALIVE,
+				   USB_DIR_IN | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0x0002, 0x0000, &response,
+				   sizeof(response), USB_CTRL_GET_TIMEOUT,
+				   GFP_KERNEL);
+	if (ret)
+		drm_err_ratelimited(&trigger5->drm,
+				    "keepalive request failed: %d\n", ret);
+
+	if (READ_ONCE(trigger5->display_enabled))
+		mod_delayed_work(trigger5->transfer_wq,
+				 &trigger5->keepalive_work,
+				 msecs_to_jiffies(TRIGGER5_KEEPALIVE_INTERVAL_MS));
+
+	drm_dev_exit(idx);
+}
+
+static void trigger5_stop_io(struct trigger5_device *trigger5)
+{
+	WRITE_ONCE(trigger5->display_enabled, false);
+	cancel_delayed_work_sync(&trigger5->keepalive_work);
+	flush_workqueue(trigger5->transfer_wq);
+}
+
 static void trigger5_free_bulk_buffer(struct trigger5_transfer *transfer)
 {
 	if (!transfer->frame_data)
@@ -235,6 +287,8 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 
 	if (!drm_dev_enter(crtc->dev, &idx))
 		return;
+
+	trigger5_stop_io(trigger5);
 
 	udev = interface_to_usbdev(trigger5->intf);
 
@@ -334,12 +388,28 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 	if (ret)
 		goto err;
 
+	WRITE_ONCE(trigger5->display_enabled, true);
+	mod_delayed_work(trigger5->transfer_wq, &trigger5->keepalive_work, 0);
+
 	goto exit;
 
 err:
 	drm_err_ratelimited(&trigger5->drm,
 			    "failed to configure display mode: %d\n", ret);
 exit:
+	drm_dev_exit(idx);
+}
+
+static void trigger5_crtc_atomic_disable(struct drm_crtc *crtc,
+					 struct drm_atomic_commit *state)
+{
+	struct trigger5_device *trigger5 = to_trigger5(crtc->dev);
+	int idx;
+
+	if (!drm_dev_enter(crtc->dev, &idx))
+		return;
+
+	trigger5_stop_io(trigger5);
 	drm_dev_exit(idx);
 }
 
@@ -471,10 +541,11 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 					 msecs_to_jiffies(10)))
 		goto exit;
 
-	/* Resize buffer to the current resolution. */
+	/* Resize buffer to the current resolution for lower memory footprint */
 	max_len = array3_size(drm_rect_width(&src_rect),
 			      drm_rect_height(&src_rect), 3);
 	max_len = size_add(max_len, sizeof(*header));
+
 	/*
 	 * Allocation failure leaves the old buffer available for smaller
 	 * partial updates.
@@ -482,8 +553,10 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 	if (max_len != current_transfer->frame_alloc_len)
 		trigger5_resize_bulk_buffer(current_transfer, max_len);
 
-	if (frame_len > current_transfer->frame_alloc_len)
+	if (frame_len > current_transfer->frame_alloc_len) {
+		complete(&current_transfer->frame_complete);
 		goto exit;
+	}
 
 	current_transfer->frame_len = frame_len;
 	header = current_transfer->frame_data;
@@ -527,6 +600,7 @@ exit:
 
 static const struct drm_crtc_helper_funcs trigger5_crtc_helper_funcs = {
 	.mode_valid = trigger5_crtc_mode_valid,
+	.atomic_disable = trigger5_crtc_atomic_disable,
 	.atomic_check = drm_crtc_helper_atomic_check,
 	.atomic_enable = trigger5_crtc_atomic_enable,
 };
@@ -666,6 +740,9 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 		goto err_alloc_1;
 	}
 
+	INIT_DELAYED_WORK(&trigger5->keepalive_work,
+			  trigger5_keepalive_work);
+
 	drm_mode_config_reset(dev);
 
 	usb_set_intfdata(interface, trigger5);
@@ -699,12 +776,14 @@ static void trigger5_usb_disconnect(struct usb_interface *interface)
 	drm_kms_helper_poll_fini(dev);
 	drm_dev_unplug(dev);
 	drm_atomic_helper_shutdown(dev);
+	trigger5_stop_io(trigger5);
 	destroy_workqueue(trigger5->transfer_wq);
 	trigger5_free_bulk_buffer(&trigger5->transfers[0]);
 	trigger5_free_bulk_buffer(&trigger5->transfers[1]);
 }
 
 static const struct usb_device_id id_table[] = {
+	/* From Windows driver INF file */
 	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5800, 0) }, /* HDMI */
 	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5801, 0) },
 	{ USB_DEVICE_INTERFACE_NUMBER(0x0711, 0x5802, 0) },
