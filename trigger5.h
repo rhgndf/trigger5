@@ -21,7 +21,6 @@
 
 #define DRIVER_MAJOR		1
 #define DRIVER_MINOR		0
-#define DRIVER_PATCHLEVEL	0
 
 struct trigger5_transfer {
 	struct trigger5_device *trigger5;
@@ -52,6 +51,7 @@ struct trigger5_device {
 	u16 frame_counter;
 
 	int current_transfer;
+	struct drm_rect pending_rect;
 	struct workqueue_struct *transfer_wq;
 	bool display_enabled;
 	struct delayed_work keepalive_work;

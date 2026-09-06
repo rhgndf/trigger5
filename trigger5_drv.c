@@ -29,12 +29,11 @@
 #include <drm/drm_gem_shmem_helper.h>
 #include <drm/drm_managed.h>
 #include <drm/drm_modeset_helper.h>
-#include <drm/drm_probe_helper.h>
-#include <drm/drm_print.h>
 #include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_print.h>
+#include <drm/drm_probe_helper.h>
 
 #include "trigger5.h"
-
 
 static void trigger5_stop_io(struct trigger5_device *trigger5)
 {
@@ -79,7 +78,6 @@ static const struct drm_driver trigger5_drm_driver = {
 	.desc = DRIVER_DESC,
 	.major = DRIVER_MAJOR,
 	.minor = DRIVER_MINOR,
-	.patchlevel = DRIVER_PATCHLEVEL,
 };
 
 static const struct drm_mode_config_funcs trigger5_mode_config_funcs = {
@@ -103,10 +101,12 @@ static u64 trigger5_calculate_pll(struct trigger5_pll *pll, int clock)
 	/* Use values found in the capture */
 	for (prediv = 1; prediv <= 0x10; prediv <<= 1) {
 		for (mul1 = 1; mul1 <= 0x32; mul1++) {
-			for (mul2 = 1; mul2 <= 0x32; mul2++) {
+			for (mul2 = mul1; mul2 <= 0x32; mul2++) {
 				for (div1 = 1; div1 <= 0x32; div1++) {
 					for (div2 = 0x02; div2 <= 0x10;
 					     div2 <<= 1) {
+						if (!best_err)
+							break;
 						calculated_clock =
 							div_u64(ref_clock * mul1 * mul2,
 								prediv * div1 * div2);
@@ -396,13 +396,14 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 		goto err;
 
 	WRITE_ONCE(trigger5->display_enabled, true);
-	mod_delayed_work(trigger5->transfer_wq, &trigger5->keepalive_work, 0);
+	/* Keepalive must only be sent after a frame has been sent */
+	mod_delayed_work(trigger5->transfer_wq, &trigger5->keepalive_work,
+			 msecs_to_jiffies(TRIGGER5_KEEPALIVE_INTERVAL_MS));
 
 	goto exit;
 
 err:
-	drm_err_ratelimited(&trigger5->drm,
-			    "failed to configure display mode: %d\n", ret);
+	drm_err(&trigger5->drm, "failed to configure display mode: %d\n", ret);
 exit:
 	drm_dev_exit(idx);
 }
@@ -416,6 +417,7 @@ static void trigger5_crtc_atomic_disable(struct drm_crtc *crtc,
 	if (!drm_dev_enter(crtc->dev, &idx))
 		return;
 
+	/* The message to send for disable is unknown */
 	trigger5_stop_io(trigger5);
 	drm_dev_exit(idx);
 }
@@ -490,6 +492,14 @@ static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
 	return checksum & 0xff;
 }
 
+static void trigger5_clear_rect(struct drm_rect *rect)
+{
+	rect->x1 = INT_MAX;
+	rect->y1 = INT_MAX;
+	rect->x2 = 0;
+	rect->y2 = 0;
+}
+
 static void trigger5_merge_rect(struct drm_rect *r1, struct drm_rect *r2)
 {
 	r1->x1 = min(r1->x1, r2->x1);
@@ -540,13 +550,16 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 		trigger5_merge_rect(&current_rect, &previous_transfer->transfer_rect);
 
-		/* Clip merged damage to the new resolution. */
-		if (!drm_rect_intersect(&current_rect, &src_rect))
-			goto exit;
-
 		current_transfer = previous_transfer;
 		trigger5->current_transfer = !trigger5->current_transfer;
 	}
+
+	trigger5_merge_rect(&current_rect, &trigger5->pending_rect);
+	trigger5_clear_rect(&trigger5->pending_rect);
+
+	/* Clip merged damage to the new resolution. */
+	if (!drm_rect_intersect(&current_rect, &src_rect))
+		goto exit;
 
 	width = drm_rect_width(&current_rect);
 	height = drm_rect_height(&current_rect);
@@ -555,8 +568,8 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 	current_transfer->transfer_rect = current_rect;
 
 	if (!wait_for_completion_timeout(&current_transfer->frame_complete,
-					 msecs_to_jiffies(10)))
-		goto exit;
+					 msecs_to_jiffies(1)))
+		goto exit_save_pending;
 
 	/* Resize buffer to the current resolution for lower memory footprint */
 	max_len = array3_size(drm_rect_width(&src_rect),
@@ -572,7 +585,7 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 	if (frame_len > current_transfer->frame_alloc_len) {
 		complete(&current_transfer->frame_complete);
-		goto exit;
+		goto exit_save_pending;
 	}
 
 	current_transfer->frame_len = frame_len;
@@ -598,7 +611,7 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 	ret = drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE);
 	if (ret < 0) {
 		complete(&current_transfer->frame_complete);
-		goto exit;
+		goto exit_save_pending;
 	}
 
 	drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
@@ -610,7 +623,10 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 	queue_work(trigger5->transfer_wq, &current_transfer->transfer_work);
 	trigger5->current_transfer = !trigger5->current_transfer;
+	goto exit;
 
+exit_save_pending:
+	trigger5->pending_rect = current_rect;
 exit:
 	drm_dev_exit(idx);
 }
@@ -704,6 +720,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
 	dev->mode_config.helper_private = &trigger5_mode_config_helper_funcs;
 
+	trigger5_clear_rect(&trigger5->pending_rect);
 	trigger5_init_transfer(trigger5, &trigger5->transfers[0]);
 	trigger5_init_transfer(trigger5, &trigger5->transfers[1]);
 
@@ -740,12 +757,12 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	if (ret)
 		goto err_alloc_1;
 
-	trigger5->encoder.possible_crtcs = drm_crtc_mask(&trigger5->crtc);
 	ret = drm_encoder_init(dev, &trigger5->encoder, &trigger5_encoder_funcs,
 			       is_hdmi ? DRM_MODE_ENCODER_TMDS :
 					 DRM_MODE_ENCODER_DAC, NULL);
 	if (ret)
 		goto err_alloc_1;
+	trigger5->encoder.possible_crtcs = drm_crtc_mask(&trigger5->crtc);
 
 	ret = drm_connector_attach_encoder(&trigger5->connector,
 					   &trigger5->encoder);
@@ -871,7 +888,7 @@ static const struct usb_device_id id_table[] = {
 MODULE_DEVICE_TABLE(usb, id_table);
 
 static struct usb_driver trigger5_driver = {
-	.name = "trigger5",
+	.name = DRIVER_NAME,
 	.probe = trigger5_usb_probe,
 	.disconnect = trigger5_usb_disconnect,
 	.suspend = trigger5_usb_suspend,
