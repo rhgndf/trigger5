@@ -51,7 +51,6 @@ struct trigger5_device {
 	u16 frame_counter;
 
 	int current_transfer;
-	struct drm_rect pending_rect;
 	struct workqueue_struct *transfer_wq;
 	bool display_enabled;
 	struct delayed_work keepalive_work;
@@ -111,6 +110,7 @@ struct trigger5_bulk_header {
 #define TRIGGER5_REQUEST_FIRMWARE_RESET		0xD1
 
 #define TRIGGER5_KEEPALIVE_INTERVAL_MS	2000
+#define TRIGGER5_BULK_TIMEOUT_MS		5000
 
 #define to_trigger5(x) container_of(x, struct trigger5_device, drm)
 

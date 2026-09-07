@@ -163,7 +163,8 @@ static void trigger5_transfer_work(struct work_struct *work)
 		goto exit;
 	}
 
-	mod_timer(&transfer->timer, jiffies + msecs_to_jiffies(5000));
+	mod_timer(&transfer->timer,
+		  jiffies + msecs_to_jiffies(TRIGGER5_BULK_TIMEOUT_MS));
 	usb_sg_wait(&transfer->sgr);
 	timer_delete_sync(&transfer->timer);
 
@@ -382,19 +383,6 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 	if (ret)
 		goto err;
 
-	data[0] = 0x01;
-	data[1] = 0x00;
-	data[2] = 0x00;
-	data[3] = 0x00;
-	ret = usb_control_msg_send(udev, 0,
-				   TRIGGER5_REQUEST_SET_CURSOR_POSITION,
-				   USB_DIR_OUT | USB_TYPE_VENDOR |
-					   USB_RECIP_DEVICE,
-				   0x0000, 0xe868, data, sizeof(data),
-				   USB_CTRL_SET_TIMEOUT, GFP_KERNEL);
-	if (ret)
-		goto err;
-
 	WRITE_ONCE(trigger5->display_enabled, true);
 	/* Keepalive must only be sent after a frame has been sent */
 	mod_delayed_work(trigger5->transfer_wq, &trigger5->keepalive_work,
@@ -412,13 +400,20 @@ static void trigger5_crtc_atomic_disable(struct drm_crtc *crtc,
 					 struct drm_atomic_commit *state)
 {
 	struct trigger5_device *trigger5 = to_trigger5(crtc->dev);
+	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
+	u8 data;
 	int idx;
 
 	if (!drm_dev_enter(crtc->dev, &idx))
 		return;
 
-	/* The message to send for disable is unknown */
 	trigger5_stop_io(trigger5);
+	usb_control_msg_recv(udev, 0,
+				TRIGGER5_REQUEST_FIRMWARE_RESET,
+				USB_DIR_IN | USB_TYPE_VENDOR |
+				USB_RECIP_DEVICE,
+				0x0001, 0x0000, &data, 1,
+				USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
 	drm_dev_exit(idx);
 }
 
@@ -492,14 +487,6 @@ static u8 trigger5_bulk_header_checksum(const struct trigger5_bulk_header *heade
 	return checksum & 0xff;
 }
 
-static void trigger5_clear_rect(struct drm_rect *rect)
-{
-	rect->x1 = INT_MAX;
-	rect->y1 = INT_MAX;
-	rect->x2 = 0;
-	rect->y2 = 0;
-}
-
 static void trigger5_merge_rect(struct drm_rect *r1, const struct drm_rect *r2)
 {
 	r1->x1 = min(r1->x1, r2->x1);
@@ -554,9 +541,6 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 		trigger5->current_transfer = !trigger5->current_transfer;
 	}
 
-	trigger5_merge_rect(&current_rect, &trigger5->pending_rect);
-	trigger5_clear_rect(&trigger5->pending_rect);
-
 	/* Clip merged damage to the new resolution. */
 	if (!drm_rect_intersect(&current_rect, &src_rect))
 		goto exit;
@@ -565,11 +549,17 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 	height = drm_rect_height(&current_rect);
 	payload_len = array3_size(width, height, 3);
 	frame_len = size_add(payload_len, sizeof(*header));
-	current_transfer->transfer_rect = current_rect;
 
+	/*
+	 * This should almost never wait because we have should have a
+	 * pending transfer ready to be de-queued above in case the transfer
+	 * hasn't finished, but do a bounded wait just in case it gets stuck
+	 */
 	if (!wait_for_completion_timeout(&current_transfer->frame_complete,
-					 msecs_to_jiffies(1)))
-		goto exit_save_pending;
+					 msecs_to_jiffies(20)))
+		goto exit;
+
+	current_transfer->transfer_rect = current_rect;
 
 	/* Resize buffer to the current resolution for lower memory footprint */
 	max_len = array3_size(drm_rect_width(&src_rect),
@@ -585,7 +575,7 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 	if (frame_len > current_transfer->frame_alloc_len) {
 		complete(&current_transfer->frame_complete);
-		goto exit_save_pending;
+		goto exit;
 	}
 
 	current_transfer->frame_len = frame_len;
@@ -611,7 +601,7 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 	ret = drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE);
 	if (ret < 0) {
 		complete(&current_transfer->frame_complete);
-		goto exit_save_pending;
+		goto exit;
 	}
 
 	drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
@@ -623,10 +613,6 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 	queue_work(trigger5->transfer_wq, &current_transfer->transfer_work);
 	trigger5->current_transfer = !trigger5->current_transfer;
-	goto exit;
-
-exit_save_pending:
-	trigger5->pending_rect = current_rect;
 exit:
 	drm_dev_exit(idx);
 }
@@ -720,7 +706,6 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
 	dev->mode_config.helper_private = &trigger5_mode_config_helper_funcs;
 
-	trigger5_clear_rect(&trigger5->pending_rect);
 	trigger5_init_transfer(trigger5, &trigger5->transfers[0]);
 	trigger5_init_transfer(trigger5, &trigger5->transfers[1]);
 
@@ -897,5 +882,6 @@ static struct usb_driver trigger5_driver = {
 	.id_table = id_table,
 };
 module_usb_driver(trigger5_driver);
+MODULE_AUTHOR("Ho Jie Feng <hjf3108@gmail.com>");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
