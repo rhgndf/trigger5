@@ -479,7 +479,7 @@ static int trigger5_plane_atomic_check(struct drm_plane *plane,
 						   false, false);
 }
 
-static u8 trigger5_bulk_header_checksum(struct trigger5_bulk_header *header)
+static u8 trigger5_bulk_header_checksum(const struct trigger5_bulk_header *header)
 {
 	u16 checksum = 0;
 	u8 *data = (u8 *)header;
@@ -500,7 +500,7 @@ static void trigger5_clear_rect(struct drm_rect *rect)
 	rect->y2 = 0;
 }
 
-static void trigger5_merge_rect(struct drm_rect *r1, struct drm_rect *r2)
+static void trigger5_merge_rect(struct drm_rect *r1, const struct drm_rect *r2)
 {
 	r1->x1 = min(r1->x1, r2->x1);
 	r1->y1 = min(r1->y1, r2->y1);
