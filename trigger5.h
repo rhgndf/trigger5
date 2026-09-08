@@ -51,6 +51,7 @@ struct trigger5_device {
 	u16 frame_counter;
 
 	int current_transfer;
+	struct drm_rect pending_rect;
 	struct workqueue_struct *transfer_wq;
 	bool display_enabled;
 	struct delayed_work keepalive_work;

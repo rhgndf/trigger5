@@ -143,16 +143,14 @@ static void trigger5_transfer_work(struct work_struct *work)
 	struct trigger5_transfer *transfer =
 		container_of(work, struct trigger5_transfer, transfer_work);
 	struct trigger5_device *trigger5 = transfer->trigger5;
-	struct usb_device *usbdev;
+	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	int idx, ret;
 
 	if (!drm_dev_enter(&trigger5->drm, &idx))
 		goto complete;
 
-	usbdev = interface_to_usbdev(trigger5->intf);
-
 	/* Submit bulk transfer with a five-second timeout. */
-	ret = usb_sg_init(&transfer->sgr, usbdev, trigger5->bulk_pipe, 0,
+	ret = usb_sg_init(&transfer->sgr, udev, trigger5->bulk_pipe, 0,
 			  transfer->transfer_sgt.sgl,
 			  transfer->transfer_sgt.nents, transfer->frame_len,
 			  GFP_KERNEL);
@@ -188,7 +186,7 @@ static void trigger5_keepalive_work(struct work_struct *work)
 	struct trigger5_device *trigger5 =
 		container_of(to_delayed_work(work), struct trigger5_device,
 			     keepalive_work);
-	struct usb_device *udev;
+	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	u8 response;
 	int idx, ret;
 
@@ -198,7 +196,6 @@ static void trigger5_keepalive_work(struct work_struct *work)
 	if (!drm_dev_enter(&trigger5->drm, &idx))
 		return;
 
-	udev = interface_to_usbdev(trigger5->intf);
 	ret = usb_control_msg_recv(udev, 0, TRIGGER5_REQUEST_KEEPALIVE,
 				   USB_DIR_IN | USB_TYPE_VENDOR |
 					   USB_RECIP_DEVICE,
@@ -284,7 +281,7 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 					struct drm_atomic_commit *state)
 {
 	struct trigger5_device *trigger5 = to_trigger5(crtc->dev);
-	struct usb_device *udev;
+	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	struct drm_crtc_state *crtc_state =
 		drm_atomic_get_new_crtc_state(state, crtc);
 	struct drm_display_mode *mode = &crtc_state->mode;
@@ -297,8 +294,6 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 		return;
 
 	trigger5_stop_io(trigger5);
-
-	udev = interface_to_usbdev(trigger5->intf);
 
 	/* Sequence recovered from USB captures. */
 	ret = usb_control_msg_recv(udev, 0,
@@ -402,18 +397,22 @@ static void trigger5_crtc_atomic_disable(struct drm_crtc *crtc,
 	struct trigger5_device *trigger5 = to_trigger5(crtc->dev);
 	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	u8 data;
-	int idx;
+	int idx, ret;
 
 	if (!drm_dev_enter(crtc->dev, &idx))
 		return;
 
 	trigger5_stop_io(trigger5);
-	usb_control_msg_recv(udev, 0,
-				TRIGGER5_REQUEST_FIRMWARE_RESET,
-				USB_DIR_IN | USB_TYPE_VENDOR |
-				USB_RECIP_DEVICE,
-				0x0001, 0x0000, &data, 1,
-				USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+
+	ret = usb_control_msg_recv(udev, 0,
+				   TRIGGER5_REQUEST_FIRMWARE_RESET,
+				   USB_DIR_IN | USB_TYPE_VENDOR |
+					   USB_RECIP_DEVICE,
+				   0x0001, 0x0000, &data, 1,
+				   USB_CTRL_GET_TIMEOUT, GFP_KERNEL);
+	if (ret)
+		drm_err(&trigger5->drm, "failed to disable display: %d\n", ret);
+
 	drm_dev_exit(idx);
 }
 
@@ -462,8 +461,6 @@ static int trigger5_plane_atomic_check(struct drm_plane *plane,
 
 	if (!new_plane_state->fb)
 		return 0;
-	if (!crtc)
-		return -EINVAL;
 
 	new_crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 
@@ -476,8 +473,8 @@ static int trigger5_plane_atomic_check(struct drm_plane *plane,
 
 static u8 trigger5_bulk_header_checksum(const struct trigger5_bulk_header *header)
 {
+	const u8 *data = (const u8 *)header;
 	u16 checksum = 0;
-	u8 *data = (u8 *)header;
 	size_t i;
 
 	for (i = 0; i < sizeof(struct trigger5_bulk_header) - 1; i++)
@@ -485,6 +482,14 @@ static u8 trigger5_bulk_header_checksum(const struct trigger5_bulk_header *heade
 	checksum &= 0xff;
 	checksum = 0x100 - checksum;
 	return checksum & 0xff;
+}
+
+static void trigger5_clear_rect(struct drm_rect *rect)
+{
+	rect->x1 = INT_MAX;
+	rect->y1 = INT_MAX;
+	rect->x2 = 0;
+	rect->y2 = 0;
 }
 
 static void trigger5_merge_rect(struct drm_rect *r1, const struct drm_rect *r2)
@@ -541,6 +546,10 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 		trigger5->current_transfer = !trigger5->current_transfer;
 	}
 
+	/* Damage deferred by an earlier failed update. */
+	trigger5_merge_rect(&current_rect, &trigger5->pending_rect);
+	trigger5_clear_rect(&trigger5->pending_rect);
+
 	/* Clip merged damage to the new resolution. */
 	if (!drm_rect_intersect(&current_rect, &src_rect))
 		goto exit;
@@ -557,7 +566,7 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 	 */
 	if (!wait_for_completion_timeout(&current_transfer->frame_complete,
 					 msecs_to_jiffies(20)))
-		goto exit;
+		goto exit_save_pending;
 
 	current_transfer->transfer_rect = current_rect;
 
@@ -575,7 +584,7 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 	if (frame_len > current_transfer->frame_alloc_len) {
 		complete(&current_transfer->frame_complete);
-		goto exit;
+		goto exit_save_pending;
 	}
 
 	current_transfer->frame_len = frame_len;
@@ -601,7 +610,7 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 	ret = drm_gem_fb_begin_cpu_access(state->fb, DMA_FROM_DEVICE);
 	if (ret < 0) {
 		complete(&current_transfer->frame_complete);
-		goto exit;
+		goto exit_save_pending;
 	}
 
 	drm_fb_xrgb8888_to_rgb888(&data_map, NULL,
@@ -613,6 +622,11 @@ static void trigger5_plane_atomic_update(struct drm_plane *plane,
 
 	queue_work(trigger5->transfer_wq, &current_transfer->transfer_work);
 	trigger5->current_transfer = !trigger5->current_transfer;
+	goto exit;
+
+	/* Retry the dropped damage on the next update. */
+exit_save_pending:
+	trigger5->pending_rect = current_rect;
 exit:
 	drm_dev_exit(idx);
 }
@@ -664,7 +678,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	struct device *dma_dev;
 	struct usb_device *udev = interface_to_usbdev(interface);
 	/* Heuristic: Presence of audio interfaces indicates HDMI. */
-	bool is_hdmi = udev->config->desc.bNumInterfaces > 1;
+	bool is_hdmi = udev->actconfig->desc.bNumInterfaces > 1;
 
 	trigger5 = devm_drm_dev_alloc(&interface->dev, &trigger5_drm_driver,
 				      struct trigger5_device, drm);
@@ -706,6 +720,7 @@ static int trigger5_usb_probe(struct usb_interface *interface,
 	dev->mode_config.funcs = &trigger5_mode_config_funcs;
 	dev->mode_config.helper_private = &trigger5_mode_config_helper_funcs;
 
+	trigger5_clear_rect(&trigger5->pending_rect);
 	trigger5_init_transfer(trigger5, &trigger5->transfers[0]);
 	trigger5_init_transfer(trigger5, &trigger5->transfers[1]);
 

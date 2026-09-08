@@ -13,13 +13,12 @@ static int trigger5_read_edid(void *data, u8 *buf, unsigned int block,
 			      size_t len)
 {
 	struct trigger5_device *trigger5 = data;
-	struct usb_device *udev;
+	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	int idx, ret;
 
 	if (!drm_dev_enter(&trigger5->drm, &idx))
 		return -ENODEV;
 
-	udev = interface_to_usbdev(trigger5->intf);
 	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0),
 			      TRIGGER5_REQUEST_GET_EDID,
 			      USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
@@ -36,33 +35,29 @@ static int trigger5_read_edid(void *data, u8 *buf, unsigned int block,
 
 static int trigger5_connector_get_modes(struct drm_connector *connector)
 {
-	int ret;
 	struct trigger5_device *trigger5 = to_trigger5(connector->dev);
 	const struct drm_edid *edid;
+	int count;
 
 	edid = drm_edid_read_custom(connector, trigger5_read_edid, trigger5);
-	ret = drm_edid_connector_update(connector, edid);
-	if (ret < 0)
-		goto edid_free;
-
-	ret = drm_edid_connector_add_modes(connector);
-edid_free:
+	drm_edid_connector_update(connector, edid);
+	count = drm_edid_connector_add_modes(connector);
 	drm_edid_free(edid);
-	return ret;
+
+	return count;
 }
 
 static enum drm_connector_status
 trigger5_detect(struct drm_connector *connector, bool force)
 {
 	struct trigger5_device *trigger5 = to_trigger5(connector->dev);
-	struct usb_device *udev;
+	struct usb_device *udev = interface_to_usbdev(trigger5->intf);
 	u8 status[2];
 	int idx, ret;
 
 	if (!drm_dev_enter(&trigger5->drm, &idx))
 		return connector_status_disconnected;
 
-	udev = interface_to_usbdev(trigger5->intf);
 	ret = usb_control_msg_recv(udev, 0, TRIGGER5_REQUEST_GET_STATUS,
 				   USB_DIR_IN | USB_TYPE_VENDOR |
 					   USB_RECIP_DEVICE,
