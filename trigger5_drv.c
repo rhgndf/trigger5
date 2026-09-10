@@ -38,8 +38,8 @@
 static void trigger5_stop_io(struct trigger5_device *trigger5)
 {
 	WRITE_ONCE(trigger5->display_enabled, false);
-	cancel_delayed_work_sync(&trigger5->keepalive_work);
 	flush_workqueue(trigger5->transfer_wq);
+	cancel_delayed_work_sync(&trigger5->keepalive_work);
 }
 
 static int trigger5_usb_suspend(struct usb_interface *interface,
@@ -174,6 +174,11 @@ static void trigger5_transfer_work(struct work_struct *work)
 		drm_err_ratelimited(&trigger5->drm,
 				    "short USB transfer: %zu/%zu bytes\n",
 				    transfer->sgr.bytes, transfer->frame_len);
+	else if (READ_ONCE(trigger5->display_enabled))
+		/* Keepalive must only be sent after a frame has been sent */
+		queue_delayed_work(trigger5->transfer_wq,
+				   &trigger5->keepalive_work,
+				   msecs_to_jiffies(TRIGGER5_KEEPALIVE_INTERVAL_MS));
 
 exit:
 	drm_dev_exit(idx);
@@ -379,9 +384,6 @@ static void trigger5_crtc_atomic_enable(struct drm_crtc *crtc,
 		goto err;
 
 	WRITE_ONCE(trigger5->display_enabled, true);
-	/* Keepalive must only be sent after a frame has been sent */
-	mod_delayed_work(trigger5->transfer_wq, &trigger5->keepalive_work,
-			 msecs_to_jiffies(TRIGGER5_KEEPALIVE_INTERVAL_MS));
 
 	goto exit;
 
