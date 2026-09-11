@@ -42,6 +42,8 @@ static int trigger5_connector_get_modes(struct drm_connector *connector)
 	edid = drm_edid_read_custom(connector, trigger5_read_edid, trigger5);
 	drm_edid_connector_update(connector, edid);
 	count = drm_edid_connector_add_modes(connector);
+	if (!count)
+		count = drm_add_modes_noedid(connector, 1920, 1200);
 	drm_edid_free(edid);
 
 	return count;

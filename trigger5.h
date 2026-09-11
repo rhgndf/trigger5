@@ -86,6 +86,7 @@ struct trigger5_mode_request {
 	u8 vsync_polarity;
 } __packed;
 
+/* gm12u320.c uses the same header format */
 struct trigger5_bulk_header {
 	u8 magic; /* 0xfb */
 	u8 length; /* 0x14 */
